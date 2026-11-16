@@ -2,6 +2,7 @@
 
 import time
 from contextlib import contextmanager
+from pathlib import Path
 
 import streamlit as st
 
@@ -63,6 +64,7 @@ st.session_state.setdefault("pending", None)
 st.session_state.setdefault("uncertain_write", False)
 
 with st.sidebar:
+    st.image(str(Path(__file__).parent / "nathan" / "nathan.png"), width="stretch")
     st.subheader("Nathan")
     st.caption("Ask about policies, review a document or check policy coverage.")
     if st.button("New chat", key="new_chat"):
