@@ -113,7 +113,7 @@ class Agent:
             if assessment.classification in {"Confirmed gap", "Potential gap"}
             else None
         )
-        return Result(text, proposal)
+        return Result(text, proposal, model=getattr(self.model, "response_model", None))
 
     def create(self, title, original_question, history):
         # One process-wide critical section covers new evidence, gap assessment and creation.

@@ -60,6 +60,7 @@ class Document:
 class Result:
     text: str
     proposal: str | None = None
+    model: str | None = None
 
 
 def rich_text(items: list[dict]) -> str:

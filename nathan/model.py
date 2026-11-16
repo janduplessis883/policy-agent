@@ -56,6 +56,7 @@ class PolicyModel:
             api_key=settings.api_key, base_url=settings.base_url, timeout=90, max_retries=1
         )
         self.model = settings.model
+        self.response_model: str | None = None
         self.system = PLAYBOOK.read_text() + AMENDMENTS
 
     def _json(
@@ -69,6 +70,7 @@ class PolicyModel:
         stream=False,
         on_text=None,
     ):
+        self.response_model = None
         content = json.dumps(payload, ensure_ascii=False, default=str)
         if len(content) > 350_000:
             raise SourceError(
@@ -96,6 +98,7 @@ class PolicyModel:
         ]
         try:
             for attempt in range(3):
+                reported_model = None
                 if on_text:
                     on_text("")
                 if stream:
@@ -104,6 +107,8 @@ class PolicyModel:
                         model=self.model, messages=messages, stream=True
                     ) as chunks:
                         for chunk in chunks:
+                            if chunk.model:
+                                reported_model = chunk.model
                             if not chunk.choices:
                                 continue
                             choice = chunk.choices[0]
@@ -123,13 +128,16 @@ class PolicyModel:
                         raise SourceError("The model did not return an answer. Please try again.")
                     raw = response.choices[0].message.content or ""
                     finish = response.choices[0].finish_reason
+                    reported_model = response.model
                 if finish != "stop":
                     raise SourceError(
                         "The model did not return a complete answer. Please try again."
                     )
                 try:
                     result = schema.model_validate(decode_response(raw)).model_dump()
-                    return validate(result) if validate else result
+                    result = validate(result) if validate else result
+                    self.response_model = reported_model
+                    return result
                 except (ValidationError, ValueError) as exc:
                     if attempt == 2:
                         raise SourceError(

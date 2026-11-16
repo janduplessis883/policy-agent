@@ -148,7 +148,7 @@ extracts only the answer text from the incremental JSON envelope; raw JSON, sour
 records and internal reasoning are not displayed. Final source validation runs before
 a response is saved or a placeholder proposal becomes available. Failed validation
 clears the temporary answer and shows the failure. A live status indicator lists the
-actual tools called, and each saved answer retains a collapsible Tools used list.
+actual tools called, and each saved answer retains a collapsible Tool use status panel.
 
 Policy selection has a dedicated task prompt rather than the full policy-answering
 playbook. Short source aliases map back to retrieved Notion page IDs. The model receives
@@ -171,3 +171,5 @@ successfully checked against the configured live Notion and model APIs after the
 changes. These checks performed no writes to Notion.
 
 The Markdown migration was verified live against the Surgery Profile and cold-chain policy; both reported complete content. No Notion records were changed.
+
+Each completed answer shows a Streamlit caption inside its Tool use status panel with the `model` name reported by the endpoint for that answer, retained in chat history. If the gateway reports only `auto`, the caption shows `auto`; an underlying model name is not inferred. Missing metadata is shown as “not reported by endpoint”.

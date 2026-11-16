@@ -74,7 +74,10 @@ def test_streamed_answer_and_tool_indicator_are_wired_to_chat(monkeypatch):
         self.on_event("Get Surgery Profile")
         self.on_text("The recorded ")
         self.on_text("The recorded lead is Test person.")
-        return Result("The recorded lead is Test person.\n\nProfile · Surgery Profile")
+        return Result(
+            "The recorded lead is Test person.\n\nProfile · Surgery Profile",
+            model="routed-answer-model",
+        )
 
     monkeypatch.setattr(Agent, "ask", ask)
     at = app()
@@ -86,5 +89,7 @@ def test_streamed_answer_and_tool_indicator_are_wired_to_chat(monkeypatch):
         "Current Date · Europe/London",
         "Get Surgery Profile",
     ]
-    assert any(e.label == "Tools used" for e in at.expander)
+    assert any(e.label == "Tool use" for e in at.status)
+    status = next(e for e in at.status if e.label == "Tool use")
+    assert any(c.value == "Model: routed-answer-model" for c in status.caption)
     assert "Profile · Surgery Profile" in at.session_state["messages"][-1]["content"]

@@ -93,10 +93,12 @@ def agent_session(on_event=None, on_text=None):
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        if message.get("tools"):
-            with st.expander("Tools used"):
-                for tool in message["tools"]:
+        if message.get("tools") or "model" in message:
+            with st.status("Tool use", state="complete", expanded=False):
+                for tool in message.get("tools", []):
                     st.text(tool)
+                if "model" in message:
+                    st.caption(f"Model: {message['model'] or 'not reported by endpoint'}")
 
 if not st.session_state.messages:
     st.write("How can I help with surgery policies?")
@@ -164,16 +166,14 @@ if question := st.chat_input("Ask Nathan about surgery policies", max_chars=8000
         st.markdown(question)
     tools = []
     with st.chat_message("assistant"):
-        status = st.status("Checking surgery sources…", expanded=True)
+        status = st.status("Tool use", expanded=True)
         output = st.empty()
 
         def report_tool(event):
             tools.append(event)
-            status.update(label=event)
             status.write(event)
 
         def show_answer(text):
-            status.update(label="Writing answer…")
             if text:
                 output.markdown(text)
             else:
@@ -183,9 +183,10 @@ if question := st.chat_input("Ask Nathan about surgery policies", max_chars=8000
             with agent_session(on_event=report_tool, on_text=show_answer) as agent:
                 result = agent.ask(question, history)
             output.markdown(result.text)
-            status.update(label="Answer complete", state="complete", expanded=False)
+            status.caption(f"Model: {result.model or 'not reported by endpoint'}")
+            status.update(state="complete", expanded=False)
             st.session_state.messages.append(
-                {"role": "assistant", "content": result.text, "tools": tools}
+                {"role": "assistant", "content": result.text, "tools": tools, "model": result.model}
             )
             if result.proposal and not st.session_state.uncertain_write:
                 st.session_state.pending = {"title": result.proposal, "question": question}

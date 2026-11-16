@@ -132,7 +132,7 @@ def test_streams_answer_text_and_maps_profile_citation():
                 "id": "test",
                 "object": "chat.completion.chunk",
                 "created": 0,
-                "model": "auto",
+                "model": "routed-answer-model",
                 "choices": [{"index": 0, "delta": {"content": part}, "finish_reason": None}],
             }
             chunks.append("data: " + json.dumps(data) + "\n\n")
@@ -143,7 +143,7 @@ def test_streams_answer_text_and_maps_profile_citation():
                     "id": "test",
                     "object": "chat.completion.chunk",
                     "created": 0,
-                    "model": "auto",
+                    "model": "routed-answer-model",
                     "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
                 }
             )
@@ -171,6 +171,7 @@ def test_streams_answer_text_and_maps_profile_citation():
         False,
         on_text=snapshots.append,
     )
+    assert model.response_model == "routed-answer-model"
     assert payloads[0]["stream"] is True
     assert "The recorded " in snapshots
     assert snapshots[-1] == "The recorded lead is Test person."
