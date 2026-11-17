@@ -113,9 +113,10 @@ pending = st.session_state.pending
 if pending and not st.session_state.uncertain_write:
     with st.container(border=True):
         st.write("Proposed placeholder: **" + pending["title"] + "**")
+        st.write("**Agent Advice:** " + pending["advice"])
         st.caption(
             "Creates one empty Notion record tagged NEW POLICY REQUIRED, "
-            "with today’s London date in Review_Date. Coverage is checked again before creation."
+            "with today’s London date in Review_Date and the synopsis in Agent Advice."
         )
         authorised = st.checkbox(
             "I require written policy coverage for this subject and "
@@ -126,7 +127,7 @@ if pending and not st.session_state.uncertain_write:
             # Consume the proposal before external work, preventing a rerun from resubmitting it.
             st.session_state.pending = None
             try:
-                with st.status("Checking placeholder coverage…", expanded=True) as status:
+                with st.status("Creating placeholder…", expanded=True) as status:
 
                     def report_creation_tool(event):
                         status.update(label=event)
@@ -134,7 +135,7 @@ if pending and not st.session_state.uncertain_write:
 
                     with agent_session(on_event=report_creation_tool) as agent:
                         result = agent.create(
-                            pending["title"], pending["question"], st.session_state.messages
+                            pending["title"], pending["advice"], pending["inventory"]
                         )
                     status.update(label="Placeholder verified", state="complete", expanded=False)
                 st.session_state.messages.append({"role": "assistant", "content": result.text})
@@ -142,6 +143,8 @@ if pending and not st.session_state.uncertain_write:
                 st.session_state.uncertain_write = True
                 st.session_state.messages.append({"role": "assistant", "content": str(exc)})
             except SourceError as exc:
+                # A rejected write or pre-write check is safe to retry after the issue is fixed.
+                st.session_state.pending = pending
                 st.session_state.messages.append({"role": "assistant", "content": str(exc)})
             except Exception:  # noqa: BLE001 -- never expose credentials in unexpected errors
                 st.session_state.uncertain_write = True
@@ -191,7 +194,11 @@ if question := st.chat_input("Ask Nathan about surgery policies", max_chars=8000
                 {"role": "assistant", "content": result.text, "tools": tools, "model": result.model}
             )
             if result.proposal and not st.session_state.uncertain_write:
-                st.session_state.pending = {"title": result.proposal, "question": question}
+                st.session_state.pending = {
+                    "title": result.proposal,
+                    "advice": result.proposal_advice,
+                    "inventory": result.proposal_inventory,
+                }
         except SourceError as exc:
             output.empty()
             status.update(label="Request could not be verified", state="error", expanded=False)

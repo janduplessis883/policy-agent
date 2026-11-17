@@ -42,10 +42,19 @@ def test_chat_and_explicit_placeholder_authorisation(monkeypatch):
     from nathan.domain import Result
 
     created = []
-    monkeypatch.setattr(Agent, "ask", lambda *args: Result("Potential gap.", "New policy"))
+    monkeypatch.setattr(
+        Agent,
+        "ask",
+        lambda *args: Result(
+            "Potential gap.",
+            "New policy",
+            proposal_advice="Define the policy scope.",
+            proposal_inventory=[],
+        ),
+    )
 
-    def create(self, title, question, history):
-        created.append((title, question))
+    def create(self, title, advice, inventory):
+        created.append((title, advice, inventory))
         return Result("Created New policy: page body empty.")
 
     monkeypatch.setattr(Agent, "create", create)
@@ -61,7 +70,7 @@ def test_chat_and_explicit_placeholder_authorisation(monkeypatch):
     at.checkbox[0].check().run()
     next(b for b in at.button if b.label == "Create placeholder").click().run()
     assert not at.exception
-    assert created == [("New policy", "Check coverage for this subject")]
+    assert created == [("New policy", "Define the policy scope.", [])]
     assert at.session_state["pending"] is None
 
 
@@ -93,3 +102,34 @@ def test_streamed_answer_and_tool_indicator_are_wired_to_chat(monkeypatch):
     status = next(e for e in at.status if e.label == "Tool use")
     assert any(c.value == "Model: routed-answer-model" for c in status.caption)
     assert "Profile · Surgery Profile" in at.session_state["messages"][-1]["content"]
+
+
+def test_rejected_creation_keeps_proposal_for_retry(monkeypatch):
+    from nathan.agent import Agent
+    from nathan.domain import Result, SourceError
+
+    monkeypatch.setattr(
+        Agent,
+        "ask",
+        lambda *args: Result(
+            "Potential gap.",
+            "ECG Policy",
+            proposal_advice="Define ECG procedures.",
+            proposal_inventory=[],
+        ),
+    )
+
+    def create(*args):
+        raise SourceError("Notion denied insert content permission. No record was created.")
+
+    monkeypatch.setattr(Agent, "create", create)
+    at = app()
+    at.text_input[0].input("123456")
+    at.button[0].click().run()
+    at.chat_input[0].set_value("Create an ECG placeholder").run()
+    at.checkbox[0].check().run()
+    next(b for b in at.button if b.label == "Create placeholder").click().run()
+    assert not at.exception
+    assert at.session_state["pending"]["title"] == "ECG Policy"
+    assert any("insert content" in m["content"] for m in at.session_state["messages"])
+    assert not at.session_state["uncertain_write"]

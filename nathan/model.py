@@ -8,6 +8,7 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nathan.domain import SourceError
+from nathan.policy_search import ranked_policy_ids
 from nathan.response import decode_response, partial_answer
 
 
@@ -31,12 +32,17 @@ class Assessment(BaseModel):
         Literal["Covered", "Revision needed", "Confirmed gap", "Potential gap"] | None
     ) = None
     placeholder_title: str | None = Field(default=None, max_length=200)
+    placeholder_advice: str | None = Field(default=None, min_length=1, max_length=1800)
 
 
 PLAYBOOK = Path(__file__).resolve().parents[1] / "docs" / "original-playbook.md"
 AMENDMENTS = """
 APPLICATION AMENDMENTS APPROVED BY THE USER (override conflicting playbook text):
 - The existing property is Review_Date, including for new placeholders.
+- Placeholders also require Agent Advice (rich text): a concise synopsis of the policy needed,
+  its scope and the main procedures/responsibilities to develop. Keep the page body empty.
+- Once the user authorises the reviewed proposal, create using the saved inventory and advice;
+  do not reload the Surgery Profile or list/read policies again.
 - A future Review_Date establishes approval and currency; no separate Approved status is needed.
   Python provides is_live for every record. Draft, placeholder, archived and superseded records
   remain non-Live. Do not infer an approval requirement absent from this amended rule.
@@ -196,17 +202,39 @@ class PolicyModel:
             return result
 
         return self._json(
-            "Classify the requested operation; do not answer the question. Select EVERY plausible "
-            "policy ID, including synonyms, broader and related policies. For whole-collection "
-            "review select all IDs. A staffing-only question can use an empty policy_ids list "
+            "Classify the requested operation; do not answer the question. Select at most 15 "
+            "policy IDs, ordered by relevance, including synonyms and related policies. "
+            "Search both titles and tags. Consider ranked_metadata_matches as lexical/synonym "
+            "hints, not proof of coverage; add semantically relevant broader policies and "
+            "existing placeholders even without exact keyword matches. "
+            "For broad reviews select up to 15 relevant policies. "
+            "For gap and placeholder requests select only plausible coverage or duplicate placeholders; "
+            "never fill the limit with unrelated records. An empty list is valid when no "
+            "inventory records are relevant. ECG, ECGs, electrocardiogram and electrocardiography "
+            "are synonyms; consider relevant broader cardiac or diagnostic policies. "
+            "An explicit request to create a placeholder uses operation placeholder. "
+            "A staffing-only question can use an empty policy_ids list "
             "because the Surgery Profile is already retrieved. Example output: "
             '{"operation":"answer","policy_ids":["P1"]}. '
             "These are candidate records, not proof of coverage.",
             {
                 "question": question,
                 "history": history[-12:],
+                "ranked_metadata_matches": [
+                    alias
+                    for pid in ranked_policy_ids(question, inventory)
+                    for alias, source_id, _ in sources
+                    if source_id == pid
+                ],
                 "inventory": [
-                    dict(asdict(p), id=alias) for (alias, _, _), p in zip(sources, inventory)
+                    {
+                        "id": alias,
+                        "title": p.title,
+                        "tags": p.tags,
+                        "review_date": p.review_date,
+                        "owners": p.owners,
+                    }
+                    for (alias, _, _), p in zip(sources, inventory)
                 ],
             },
             Selection,
@@ -222,8 +250,24 @@ class PolicyModel:
         aliases = {source_id: alias for alias, source_id, _ in sources}
 
         def validate(result):
+            if (
+                result.get("classification") in {"Confirmed gap", "Potential gap"}
+                and not (result.get("placeholder_title") or "").strip()
+            ):
+                raise ValueError(
+                    "A gap requires a topic-specific placeholder_title and creation offer."
+                )
+            if (
+                result.get("classification") in {"Confirmed gap", "Potential gap"}
+                and not (result.get("placeholder_advice") or "").strip()
+            ):
+                raise ValueError("A gap requires placeholder_advice: a synopsis of what is needed.")
             for citation in result["citations"]:
                 citation["policy_id"] = self._resolve(citation["policy_id"], sources)
+                if citation["policy_id"] != profile.id and not any(
+                    d.id == citation["policy_id"] and d.text for d in documents
+                ):
+                    raise ValueError("An unreadable policy cannot support a content citation.")
             return result
 
         return self._json(
@@ -236,8 +280,23 @@ class PolicyModel:
             'titles; use "not stated" for missing detail. Distinguish owner from suggested lead. '
             "No creation has happened. A confirmed gap requires exhaustive complete evidence "
             "AND an explicit user instruction that written coverage is required. External "
-            "requirements cannot be verified. For Confirmed/Potential gaps you may propose a "
-            "placeholder_title, otherwise null. Disclose incomplete reads; never call them a "
+            "requirements cannot be verified. For every Confirmed gap or Potential gap you MUST "
+            "provide a concise, topic-specific placeholder_title and placeholder_advice (up to 1800 "
+            "characters summarising the scope, procedures, responsibilities and gaps to address). "
+            "Use the evidence and requested topic; do not invent requirements or staff names. "
+            "Offer to create an empty "
+            "placeholder using Create placeholder; otherwise placeholder_title must be null. "
+            "An explicit creation request establishes that written coverage is wanted. "
+            "When complete_collection_read is false, use Potential gap if relevant coverage "
+            "was not found, disclose the limited scope, and still offer a placeholder. "
+            "A proposal or creation offer in chat history is not an existing Notion record. "
+            "Only records in the current inventory establish that a policy or placeholder exists. "
+            "Do not offer a duplicate if an existing policy or placeholder covers the topic; "
+            "recommend revision for inadequate existing coverage. Never claim creation succeeded. "
+            "The retrieval_status field distinguishes no candidates from unreadable or partial "
+            "candidate documents. An empty complete document was read successfully. "
+            "Never interpret unreadable content as absent coverage or cite it as evidence. "
+            "Disclose incomplete reads; never call them a "
             "confirmed gap. Keep answers concise per the playbook. Return all data as JSON, "
             "not a tool call. For normal answers classification and placeholder_title are null.",
             {
@@ -246,12 +305,26 @@ class PolicyModel:
                 "today": today,
                 "profile": dict(asdict(profile), id="S0"),
                 "policies": [
-                    dict(asdict(p), id=aliases[p.id], is_live=p.is_live(today))
+                    {
+                        "id": aliases[p.id],
+                        "title": p.title,
+                        "tags": p.tags,
+                        "review_date": p.review_date,
+                        "owners": p.owners,
+                        "is_live": p.is_live(today),
+                    }
                     for p in policies
                     if p.id in read_ids
                 ],
                 "documents": [dict(asdict(d), id=aliases[d.id]) for d in documents],
                 "complete_collection_read": exhaustive,
+                "retrieval_status": (
+                    "no_relevant_policy_found"
+                    if not documents
+                    else "relevant_content_unavailable"
+                    if any(not d.complete for d in documents)
+                    else "relevant_policies_read"
+                ),
             },
             Assessment,
             system=self.system,

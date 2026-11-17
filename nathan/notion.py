@@ -31,6 +31,24 @@ class NotionClient:
                         )
                     if not write and response.status_code >= 500 and attempt == 0:
                         continue
+                    if write:
+                        guidance = {
+                            400: "Check the Policies property names and types: Policy (title), "
+                            "Tags (multi-select), Review_Date (date), and Agent Advice (rich text).",
+                            401: "Check the Notion integration token.",
+                            403: "Enable insert content permission for the Notion integration "
+                            "and share the Policies database with it.",
+                            404: "Check the configured data source ID and share the Policies database "
+                            "with the Notion integration.",
+                            429: "Notion rate limit reached. Wait briefly before trying again.",
+                        }.get(
+                            response.status_code,
+                            "Check Notion integration access and database settings.",
+                        )
+                        raise SourceError(
+                            f"Notion rejected placeholder creation (HTTP {response.status_code}). "
+                            f"No record was created. {guidance}"
+                        )
                     raise SourceError(
                         "Notion could not complete the request. Check integration "
                         "access and the configured database properties."
@@ -52,14 +70,16 @@ class NotionClient:
                     ) from exc
         raise SourceError("Notion rate limit reached. Please try again shortly.")
 
-    def paginate(self, method, path, payload=None):
+    def paginate(self, method, path, payload=None, *, params=None):
         results, cursor, seen = [], None, set()
         while True:
             args = dict(payload or {}, page_size=100)
             if cursor:
                 args["start_cursor"] = cursor
             data = self.request(
-                method, path, **({"params": args} if method == "GET" else {"json": args})
+                method,
+                path,
+                **({"params": args} if method == "GET" else {"json": args, "params": params}),
             )
             if not isinstance(data.get("results"), list):
                 raise SourceError("Notion returned an incomplete collection.")
@@ -73,7 +93,10 @@ class NotionClient:
 
     def query(self, filter=None):
         return self.paginate(
-            "POST", f"data_sources/{DATA_SOURCE_ID}/query", {"filter": filter} if filter else {}
+            "POST",
+            f"data_sources/{DATA_SOURCE_ID}/query",
+            {"filter": filter} if filter else {},
+            params={"filter_properties": ["Policy", "Tags", "Review_Date", "Policy_Owner"]},
         )
 
     def children(self, block_id):

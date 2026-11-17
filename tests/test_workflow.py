@@ -86,8 +86,10 @@ def test_creation_sends_exact_fields_and_no_template():
             return {"id": "new", "properties": self.payload["properties"]}
 
     client = Client()
-    created = create_placeholder(client, "New policy", date(2026, 11, 16), [])
-    assert set(client.payload["properties"]) == {"Policy", "Tags", "Review_Date"}
+    created = create_placeholder(
+        client, "New policy", date(2026, 11, 16), [], "Define the required procedure."
+    )
+    assert set(client.payload["properties"]) == {"Policy", "Tags", "Review_Date", "Agent Advice"}
     assert client.payload.get("children", []) == []
     assert "template" not in client.payload
     assert created["id"] == "new"
@@ -95,13 +97,15 @@ def test_creation_sends_exact_fields_and_no_template():
 
 def test_creation_blocks_duplicate_title():
     with pytest.raises(SourceError):
-        create_placeholder(None, "  SAFETY ", date.today(), [Policy(id="p", title="Safety")])
+        create_placeholder(
+            None, "  SAFETY ", date.today(), [Policy(id="p", title="Safety")], "Advice"
+        )
 
 
-def test_gap_reads_every_policy_and_rejects_incomplete_evidence():
+def test_gap_reads_selected_policies_and_downgrades_incomplete_evidence():
     class GapModel(Model):
         def select(self, *args):
-            return {"operation": "gap", "policy_ids": []}
+            return {"operation": "gap", "policy_ids": [p.id for p in sources.policies]}
 
         def respond(self, *args):
             return {
@@ -119,8 +123,10 @@ def test_gap_reads_every_policy_and_rejects_incomplete_evidence():
         return Document(id=policy.id, title=policy.title, text="Text", complete=False)
 
     sources.read = read
-    with pytest.raises(SourceError, match="fully verified"):
-        Agent(sources, GapModel()).ask("Is coverage missing?", [])
+    result = Agent(sources, GapModel()).ask("Is coverage missing?", [])
+    assert "Potential gap" in result.text
+    assert "could not be read" in result.text
+    assert result.proposal is None
     assert sources.calls == ["profile", "inventory", "read:p", "read:q"]
 
 
@@ -141,16 +147,7 @@ def test_non_live_procedures_are_withheld_from_answer_model():
     assert "No Live" in Agent(sources, InspectModel()).ask("What do I do?", []).text
 
 
-def test_creation_revalidates_and_refreshes_inventory():
-    class GapModel(Model):
-        def respond(self, *args):
-            return {
-                "answer": "Gap confirmed.",
-                "citations": [],
-                "classification": "Confirmed gap",
-                "placeholder_title": "New policy",
-            }
-
+def test_authorised_creation_uses_saved_inventory_and_advice_without_reloading():
     class Client:
         def request(self, method, path, **kwargs):
             self.properties = kwargs["json"]["properties"]
@@ -164,35 +161,19 @@ def test_creation_revalidates_and_refreshes_inventory():
 
     sources = Sources()
     sources.client = Client()
-    text = Agent(sources, GapModel()).create("New policy", "Need this policy", []).text
-    assert sources.calls == ["profile", "inventory", "read", "inventory"]
-    assert text.startswith("Created New policy")
+    advice = "Define ECG recording, interpretation, escalation and staff training."
+    text = Agent(sources, Model()).create("ECG Policy", advice, sources.policies).text
+    assert sources.calls == []
+    assert sources.client.properties["Agent Advice"]["rich_text"][0]["text"]["content"] == advice
+    assert text.startswith("Created ECG Policy")
 
 
-def test_creation_stops_if_policy_content_changed():
-    from dataclasses import replace
-
-    class GapModel(Model):
-        def respond(self, *args):
-            return {
-                "answer": "Gap confirmed.",
-                "citations": [],
-                "classification": "Confirmed gap",
-                "placeholder_title": "New policy",
-            }
-
+def test_creation_checks_duplicates_against_saved_inventory():
     sources = Sources()
-    original_inventory = sources.inventory
-
-    def inventory():
-        policies = original_inventory()
-        if sources.calls.count("inventory") == 2:
-            return [replace(policies[0], last_edited_time="changed")]
-        return policies
-
-    sources.inventory = inventory
-    with pytest.raises(SourceError, match="inventory changed"):
-        Agent(sources, GapModel()).create("New policy", "Need written coverage", [])
+    sources.client = None
+    with pytest.raises(SourceError, match="existing record"):
+        Agent(sources, Model()).create("Safety", "Define safety procedures.", sources.policies)
+    assert sources.calls == []
 
 
 def test_staff_answer_can_cite_retrieved_surgery_profile():
@@ -222,3 +203,190 @@ def test_reports_actual_tool_order_to_ui():
         "List Policies",
         "Read Policy · Safety",
     ]
+
+
+@pytest.mark.parametrize("operation", ["answer", "review", "gap", "placeholder"])
+def test_policy_reads_are_capped_at_fifteen(operation):
+    sources = Sources()
+    sources.policies = [Policy(id=f"p{i}", title=f"Policy {i}") for i in range(25)]
+
+    class BroadModel(Model):
+        def select(self, *args):
+            return {"operation": operation, "policy_ids": [p.id for p in sources.policies]}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert len(documents) == 15
+            assert not exhaustive
+            return {"answer": "Limited review.", "citations": []}
+
+    result = Agent(sources, BroadModel()).ask("Review everything", [])
+    assert sources.calls.count("read") == 15
+    assert "15" in result.text
+
+
+def test_exactly_fifteen_policies_can_still_be_exhaustive():
+    sources = Sources()
+    sources.policies = [Policy(id=f"p{i}", title=f"Policy {i}") for i in range(15)]
+
+    class GapModel(Model):
+        def select(self, *args):
+            return {"operation": "gap", "policy_ids": [p.id for p in sources.policies]}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert len(documents) == 15
+            assert exhaustive
+            return {"answer": "Reviewed all policies.", "citations": []}
+
+    Agent(sources, GapModel()).ask("Review everything", [])
+    assert sources.calls.count("read") == 15
+
+
+def test_ecg_placeholder_offer_does_not_read_unrelated_policies():
+    sources = Sources()
+    sources.policies = [Policy(id=f"p{i}", title=f"Unrelated {i}") for i in range(30)]
+
+    class ECGModel(Model):
+        def select(self, *args):
+            return {"operation": "placeholder", "policy_ids": []}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert documents == []
+            assert not exhaustive
+            return {
+                "answer": "ECG coverage was not found; collection coverage is unverified.",
+                "citations": [],
+                "classification": "Potential gap",
+                "placeholder_title": "ECG Policy",
+                "placeholder_advice": "Define ECG recording and escalation.",
+            }
+
+    result = Agent(sources, ECGModel()).ask("Create a placeholder policy on ECGs", [])
+    assert sources.calls == ["profile", "inventory"]
+    assert result.proposal == "ECG Policy"
+    assert "Create placeholder" in result.text
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_proposal_preserves_advice_and_inventory_only_after_complete_reads(complete):
+    sources = Sources()
+
+    class ECGModel(Model):
+        def select(self, *args):
+            return {"operation": "placeholder", "policy_ids": ["p"]}
+
+        def respond(self, *args):
+            return {
+                "answer": "ECG coverage not found.",
+                "citations": [],
+                "classification": "Potential gap",
+                "placeholder_title": "ECG Policy",
+                "placeholder_advice": "Define ECG recording and escalation.",
+            }
+
+    sources.read = lambda p: Document(p.id, p.title, "Text", complete=complete)
+    result = Agent(sources, ECGModel()).ask("Create ECG policy", [])
+    if complete:
+        assert result.proposal == "ECG Policy"
+        assert result.proposal_advice == "Define ECG recording and escalation."
+        assert result.proposal_inventory == sources.policies
+    else:
+        assert result.proposal is None
+
+
+def test_partial_confirmed_gap_is_downgraded_and_retains_placeholder_offer():
+    class GapModel(Model):
+        def respond(self, *args):
+            return {
+                "answer": "No policy exists anywhere.",
+                "citations": [],
+                "classification": "Confirmed gap",
+                "placeholder_title": "New policy",
+                "placeholder_advice": "Define the required procedure.",
+            }
+
+    sources = Sources()
+    sources.policies.append(Policy("unrelated", "Other"))
+    result = Agent(sources, GapModel()).ask("Need written coverage", [])
+    assert "Potential gap" in result.text
+    assert "not reviewed" in result.text
+    assert "No policy exists anywhere" not in result.text
+    assert result.proposal == "New policy"
+
+
+def test_title_tag_search_recovers_ecg_match_from_empty_model_selection():
+    sources = Sources()
+    sources.policies = [Policy("ecg", "Electrocardiography", review_date="2027-01-01")]
+
+    class ECGModel(Model):
+        def select(self, *args):
+            return {"operation": "gap", "policy_ids": []}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert [d.id for d in documents] == ["ecg"]
+            return {"answer": "Existing ECG coverage found.", "citations": []}
+
+    Agent(sources, ECGModel()).ask("Do we have an ECG policy?", [])
+    assert sources.calls.count("read") == 1
+
+
+def test_unreadable_relevant_policy_is_reported_without_a_placeholder():
+    sources = Sources()
+
+    def read(policy):
+        raise SourceError("Not accessible")
+
+    sources.read = read
+
+    class GapModel(Model):
+        def select(self, *args):
+            return {"operation": "gap", "policy_ids": ["p"]}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert not exhaustive
+            assert not documents[0].complete
+            return {
+                "answer": "Missing.",
+                "citations": [],
+                "classification": "Confirmed gap",
+                "placeholder_title": "New policy",
+                "placeholder_advice": "Define procedure.",
+            }
+
+    result = Agent(sources, GapModel()).ask("Is coverage missing?", [])
+    assert "Potential gap" in result.text
+    assert "could not be read" in result.text
+    assert "Safety" in result.text
+    assert result.proposal is None
+
+
+def test_unreadable_policy_cannot_support_a_content_citation():
+    sources = Sources()
+    sources.read = lambda p: Document(p.id, p.title, "", complete=False)
+    with pytest.raises(SourceError, match="unverified policy citation"):
+        Agent(sources, Model()).ask("Safety procedure", [])
+
+
+def test_synonym_matches_respect_fifteen_policy_read_limit():
+    sources = Sources()
+    sources.policies = [Policy(f"p{i}", f"Electrocardiography {i}") for i in range(20)]
+
+    class GapModel(Model):
+        def select(self, *args):
+            return {"operation": "gap", "policy_ids": []}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert len(documents) == 15
+            assert not exhaustive
+            return {
+                "answer": "Review limited.",
+                "citations": [],
+                "classification": "Confirmed gap",
+                "placeholder_title": "ECG policy",
+                "placeholder_advice": "Define recording and escalation.",
+            }
+
+    result = Agent(sources, GapModel()).ask("ECG coverage", [])
+    assert sources.calls.count("read") == 15
+    assert "Potential gap" in result.text
+    assert "15" in result.text
+    assert result.proposal is None

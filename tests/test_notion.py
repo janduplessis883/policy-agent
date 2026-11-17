@@ -142,3 +142,86 @@ def test_profile_uses_markdown_reader():
             }
 
     assert "Clinical leads" in get_surgery_profile(Client()).text
+
+
+def test_listing_requests_only_required_properties_on_every_page():
+    from nathan.tools.list_policies import list_policies
+
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.url.params.get_list("filter_properties") == [
+            "Policy",
+            "Tags",
+            "Review_Date",
+            "Policy_Owner",
+        ]
+        return httpx.Response(
+            200, json={"results": [], "has_more": len(calls) == 1, "next_cursor": "next"}
+        )
+
+    client = NotionClient("secret", httpx.MockTransport(handler))
+    assert list_policies(client) == []
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "status,code,expected",
+    [
+        (403, "restricted_resource", "insert content"),
+        (400, "validation_error", "property names and types"),
+        (404, "object_not_found", "share the Policies database"),
+    ],
+)
+def test_creation_rejection_explains_notion_failure(status, code, expected):
+    client = NotionClient(
+        "secret",
+        httpx.MockTransport(
+            lambda request: httpx.Response(status, json={"code": code, "message": "private detail"})
+        ),
+    )
+    with pytest.raises(SourceError, match=expected) as error:
+        client.request("POST", "pages", write=True, json={})
+    assert str(status) in str(error.value)
+    assert "private detail" not in str(error.value)
+
+
+def test_creation_posts_to_notion_and_verifies_saved_page():
+    import json
+    from datetime import date
+
+    from nathan.config import DATA_SOURCE_ID
+    from nathan.tools.create_placeholder import create_placeholder
+
+    calls = []
+    saved = {}
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.method == "POST":
+            assert request.url.path == "/v1/pages"
+            payload = json.loads(request.content)
+            assert payload["parent"] == {"type": "data_source_id", "data_source_id": DATA_SOURCE_ID}
+            assert set(payload["properties"]) == {"Policy", "Tags", "Review_Date", "Agent Advice"}
+            assert payload["children"] == []
+            saved.update(payload["properties"])
+            return httpx.Response(200, json={"id": "new-ecg"})
+        if request.url.path == "/v1/pages/new-ecg":
+            return httpx.Response(200, json={"id": "new-ecg", "properties": saved})
+        assert request.url.path == "/v1/blocks/new-ecg/children"
+        return httpx.Response(200, json={"results": [], "has_more": False})
+
+    client = NotionClient("secret", httpx.MockTransport(handler))
+    assert create_placeholder(
+        client, "ECG Policy", date(2026, 11, 17), [], "Define ECG procedures."
+    ) == {
+        "id": "new-ecg",
+        "public_url": None,
+    }
+    assert calls == [
+        ("POST", "/v1/pages"),
+        ("GET", "/v1/pages/new-ecg"),
+        ("GET", "/v1/blocks/new-ecg/children"),
+    ]
+    client.close()

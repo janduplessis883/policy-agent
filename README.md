@@ -83,16 +83,27 @@ and placeholders remain excluded. For operational answers, non-Live procedure te
 is withheld from the response model. Reviews may assess non-Live content as such.
 Ownership and staff responsibilities remain evidence-based model assessments.
 
-Gap requests read all accessible policy documents, including broader coverage and
-existing placeholders. Incomplete reads prevent a confirmed gap. Proposals appear
-with a checkbox requiring written policy coverage and a **Create placeholder** button.
-The button triggers a fresh date/profile/inventory/read sequence, reconfirms the gap,
-and refreshes inventory again immediately before creation. Inventory edits invalidate
-the proposal. An exact normalised title check supplements semantic duplicate checks.
+Policy selection combines ranked title/tag keyword and synonym matches with semantic model
+selection. Common terms such as ECG/electrocardiography, cold chain/vaccine storage and
+end-of-life/palliative care are expanded locally. The combined selection reads at most
+15 policies and does not fill empty selections with unrelated inventory records.
 
-Creation sends only `Policy`, `Tags = NEW POLICY REQUIRED`, `Review_Date = today`, and
-an empty children array. It does not request a template, assign an owner or change
-existing records. The app reads back properties and children before claiming success.
+Gap requests read at most 15 relevant policies, including broader coverage and existing
+placeholders. Unsupported Confirmed gap assessments are downgraded to Potential gap,
+with a scope explanation instead of an error. No title/tag candidate found is distinguished
+from relevant content that could not be read. Failed policy reads do not stop the remaining
+reads, do not prove missing coverage and cannot support content citations. Incomplete or
+capped reads cannot produce an actionable creation proposal.
+Proposals display a synopsis and a checkbox requiring written policy coverage, followed
+by a **Create placeholder** button. Authorization uses the saved proposal and inventory;
+it does not reload the Surgery Profile, list policies, reread policies or call the model.
+The creation date is obtained again in Europe/London. Duplicate title checks use the
+saved inventory, so edits made in Notion after the proposal are not rechecked.
+
+Creation sends `Policy`, `Tags = NEW POLICY REQUIRED`, `Review_Date = today`,
+`Agent Advice` (rich text containing a synopsis of what the policy needs to cover), and
+an empty children array. It does not assign an owner or change existing records.
+The app reads back all four properties and children before claiming success.
 An uncertain creation disables further writes in that browser session; inspect Notion
 before starting a new session. External editors can still race a creation because
 Notion does not provide a transactional uniqueness constraint for policy titles.

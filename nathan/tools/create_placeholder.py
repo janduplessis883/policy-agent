@@ -9,14 +9,18 @@ def normalise(title):
     return re.sub(r"\W+", " ", title.casefold()).strip()
 
 
-def create_placeholder(client, title: str, today: date, fresh_inventory: list):
-    """Caller must hold the write lock and have just revalidated the confirmed gap."""
+def create_placeholder(client, title: str, today: date, inventory: list, advice: str):
+    """Create an authorised proposal from its saved inventory; caller holds the write lock."""
     title = title.strip()
     if not title or len(title) > 200:
         raise SourceError("A concise policy title is required.")
-    if any(normalise(p.title) == normalise(title) for p in fresh_inventory):
+    if any(normalise(p.title) == normalise(title) for p in inventory):
         raise SourceError("An existing record already has this title. No placeholder was created.")
+    advice = (advice or "").strip()
+    if not advice or len(advice) > 1800:
+        raise SourceError("A policy synopsis of 1–1800 characters is required in Agent Advice.")
     properties = {
+        "Agent Advice": {"rich_text": [{"text": {"content": advice}}]},
         "Policy": {"title": [{"text": {"content": title}}]},
         "Tags": {"multi_select": [{"name": "NEW POLICY REQUIRED"}]},
         "Review_Date": {"date": {"start": today.isoformat()}},
@@ -39,6 +43,7 @@ def create_placeholder(client, title: str, today: date, fresh_inventory: list):
             rich_text(props["Policy"]["title"]) == title
             and [t["name"] for t in props["Tags"]["multi_select"]] == ["NEW POLICY REQUIRED"]
             and props["Review_Date"]["date"]["start"] == today.isoformat()
+            and rich_text(props["Agent Advice"]["rich_text"]) == advice
             and not client.children(page_id)
         )
         if not good:

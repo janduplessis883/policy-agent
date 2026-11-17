@@ -61,6 +61,8 @@ class Result:
     text: str
     proposal: str | None = None
     model: str | None = None
+    proposal_advice: str | None = None
+    proposal_inventory: list[Policy] | None = None
 
 
 def rich_text(items: list[dict]) -> str:

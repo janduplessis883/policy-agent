@@ -179,3 +179,64 @@ def test_streams_answer_text_and_maps_profile_citation():
     assert assessment["classification"] is None
     assert all("policy_id" not in text for text in snapshots)
     model.close()
+
+
+def test_selection_inventory_contains_only_required_metadata():
+    model, calls = compatible_model([json.dumps({"operation": "answer", "policy_ids": ["P1"]})])
+    policy = Policy(
+        id="p",
+        title="Safety",
+        tags=["Clinical"],
+        owners=["Lead"],
+        review_date="2027-01-01",
+        version=42,
+        public_url="https://example.test",
+        last_edited_time="today",
+    )
+    model.select("Question", [], [policy])
+    inventory = json.loads(calls[0]["messages"][1]["content"])["inventory"]
+    assert inventory == [
+        {
+            "id": "P1",
+            "title": "Safety",
+            "tags": ["Clinical"],
+            "owners": ["Lead"],
+            "review_date": "2027-01-01",
+        }
+    ]
+    model.close()
+
+
+def test_gap_response_requires_synopsis_for_agent_advice():
+    from datetime import date
+
+    import pytest
+
+    from nathan.domain import Document
+
+    model = PolicyModel(Settings("test", "test", "123456"))
+
+    def json_stage(instructions, payload, schema, **kwargs):
+        return kwargs["validate"](
+            {
+                "answer": "Missing ECG coverage.",
+                "citations": [],
+                "classification": "Potential gap",
+                "placeholder_title": "ECG Policy",
+            }
+        )
+
+    model._json = json_stage
+    try:
+        with pytest.raises(ValueError, match="placeholder_advice"):
+            model.respond(
+                "ECG policy",
+                [],
+                date(2026, 11, 17),
+                Document("profile", "Profile", "Text"),
+                [],
+                [],
+                False,
+            )
+    finally:
+        model.close()
