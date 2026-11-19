@@ -1,6 +1,8 @@
 import re
 from dataclasses import replace
+from datetime import datetime
 from threading import Lock
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
@@ -26,10 +28,11 @@ def source_link(title, url):
 
 
 class Agent:
-    def __init__(self, sources, model, clock=current_date, on_event=None, on_text=None):
+    def __init__(self, sources, model, clock=current_date, on_event=None, on_text=None, log_answer=None):
         self.sources, self.model, self.clock = sources, model, clock
         self.on_event = on_event or (lambda _event: None)
         self.on_text = on_text
+        self.log_answer = log_answer
 
     def _evaluate(self, question, history, force_gap=False):
         self.on_event("Current Date · Europe/London")
@@ -162,6 +165,19 @@ class Agent:
         )
         if proposal:
             text += f"\n\nUse Create placeholder to create an empty {label(proposal)} record."
+        if self.log_answer:
+            calls = self.model.calls
+            models = list(dict.fromkeys(model for model, _ in calls if model))
+            counts = [tokens for _, tokens in calls]
+            total = sum(counts) if counts and None not in counts else None
+            try:
+                self.log_answer(
+                    question, text, datetime.now(ZoneInfo("Europe/London")), models, total
+                )
+            except SourceError:
+                self.on_event("Log Answer · Notion did not confirm the save")
+            else:
+                self.on_event("Log Answer · saved to Notion")
         return Result(
             text,
             proposal,

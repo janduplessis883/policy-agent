@@ -2,6 +2,7 @@
 
 import time
 from contextlib import contextmanager
+from functools import partial
 from pathlib import Path
 
 import streamlit as st
@@ -13,6 +14,7 @@ from nathan.domain import SourceError, UncertainWrite
 from nathan.model import PolicyModel
 from nathan.notion import NotionClient
 from nathan.sources import Sources
+from nathan.tools.log_answer import log_answer
 
 st.set_page_config(
     page_title="Nathan | Stanhope Mews Surgery", page_icon=":material/policy:", layout="centered"
@@ -82,11 +84,14 @@ with st.sidebar:
 
 @contextmanager
 def agent_session(on_event=None, on_text=None):
-    # Clients contain credentials but never leave the server or persist chat data.
+    # Clients and their credentials stay on the server.
     notion = NotionClient(settings.notion_token)
     model = PolicyModel(settings)
     try:
-        yield Agent(Sources(notion), model, on_event=on_event, on_text=on_text)
+        yield Agent(
+            Sources(notion), model, on_event=on_event, on_text=on_text,
+            log_answer=partial(log_answer, notion),
+        )
     finally:
         notion.close()
         model.close()

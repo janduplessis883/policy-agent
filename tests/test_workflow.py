@@ -5,6 +5,7 @@ import pytest
 from nathan.agent import Agent
 from nathan.domain import Document, Policy, SourceError
 from nathan.tools.create_placeholder import create_placeholder
+from nathan.tools.log_answer import log_answer
 
 
 class Sources:
@@ -60,6 +61,43 @@ def test_profile_failure_stops_before_inventory():
     with pytest.raises(SourceError):
         Agent(sources, Model()).ask("Question", [])
     assert sources.calls == ["profile"]
+
+
+@pytest.mark.parametrize("save_fails", [False, True])
+def test_logs_final_answer_without_losing_it_if_notion_fails(save_fails):
+    class Client:
+        def request(self, method, path, **kwargs):
+            requests.append((method, path, kwargs))
+            if save_fails:
+                raise SourceError("Notion unavailable")
+            return {"id": "log-page"}
+
+    requests = []
+    events = []
+    model = Model()
+    model.calls = [("selection-model", 200), ("answer-model", 300)]
+    agent = Agent(
+        Sources(), model, on_event=events.append,
+        log_answer=lambda *args: log_answer(Client(), *args),
+    )
+
+    result = agent.ask("What is the safety policy?", [])
+
+    [(method, path, kwargs)] = requests
+    assert (method, path, kwargs["write"]) == ("POST", "pages", True)
+    payload = kwargs["json"]
+    assert payload["parent"]["data_source_id"] == "41dfdfd6-8a97-80f2-addc-000bae8d9225"
+    assert payload["markdown"] == result.text
+    assert "✓ Read in full" in payload["markdown"]
+    props = payload["properties"]
+    assert props["Question?"]["title"][0]["text"]["content"] == "What is the safety policy?"
+    assert "T" in props["Date"]["date"]["start"]
+    assert props["Model"]["rich_text"][0]["text"]["content"] == "selection-model, answer-model"
+    assert props["Tokens used"]["number"] == 500
+    assert events[-1] == (
+        "Log Answer · Notion did not confirm the save" if save_fails
+        else "Log Answer · saved to Notion"
+    )
 
 
 def test_unknown_policy_reference_is_rejected():

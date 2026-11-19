@@ -63,6 +63,7 @@ class PolicyModel:
         )
         self.model = settings.model
         self.response_model: str | None = None
+        self.calls: list[tuple[str | None, int | None]] = []
         self.system = PLAYBOOK.read_text() + AMENDMENTS
 
     def _json(
@@ -105,16 +106,19 @@ class PolicyModel:
         try:
             for attempt in range(3):
                 reported_model = None
+                usage = None
                 if on_text:
                     on_text("")
                 if stream:
                     raw, finish, shown = "", None, ""
                     with self.client.chat.completions.create(
-                        model=self.model, messages=messages, stream=True
+                        model=self.model, messages=messages, stream=True,
+                        stream_options={"include_usage": True},
                     ) as chunks:
                         for chunk in chunks:
                             if chunk.model:
                                 reported_model = chunk.model
+                            usage = getattr(chunk, "usage", None) or usage
                             if not chunk.choices:
                                 continue
                             choice = chunk.choices[0]
@@ -135,6 +139,8 @@ class PolicyModel:
                     raw = response.choices[0].message.content or ""
                     finish = response.choices[0].finish_reason
                     reported_model = response.model
+                    usage = getattr(response, "usage", None)
+                self.calls.append((reported_model, getattr(usage, "total_tokens", None)))
                 if finish != "stop":
                     raise SourceError(
                         "The model did not return a complete answer. Please try again."
@@ -195,6 +201,7 @@ class PolicyModel:
         return matches.pop()
 
     def select(self, question, history, inventory):
+        self.calls.clear()
         sources = [(f"P{i}", p.id, p.title) for i, p in enumerate(inventory, 1)]
 
         def validate(result):

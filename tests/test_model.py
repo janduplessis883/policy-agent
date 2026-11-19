@@ -149,6 +149,16 @@ def test_streams_answer_text_and_maps_profile_citation():
             )
             + "\n\n"
         )
+        chunks.append(
+            "data: " + json.dumps({
+                "id": "test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "routed-answer-model",
+                "choices": [],
+                "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+            }) + "\n\n"
+        )
         chunks.append("data: [DONE]\n\n")
         return httpx.Response(
             200, headers={"Content-Type": "text/event-stream"}, text="".join(chunks)
@@ -172,7 +182,9 @@ def test_streams_answer_text_and_maps_profile_citation():
         on_text=snapshots.append,
     )
     assert model.response_model == "routed-answer-model"
+    assert model.calls == [("routed-answer-model", 150)]
     assert payloads[0]["stream"] is True
+    assert payloads[0]["stream_options"] == {"include_usage": True}
     assert "The recorded " in snapshots
     assert snapshots[-1] == "The recorded lead is Test person."
     assert assessment["citations"][0]["policy_id"] == "real-profile"
