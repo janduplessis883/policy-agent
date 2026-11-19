@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from nathan.config import QUESTION_LOG_DATA_SOURCE_ID
+QUESTION_LOG_DATA_SOURCE_ID = "41dfdfd6-8a97-80f2-addc-000bae8d9225"
 
 
 def log_answer(client, question, answer, completed_at: datetime, models, total_tokens):

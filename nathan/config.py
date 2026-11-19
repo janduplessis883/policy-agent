@@ -5,7 +5,6 @@ from nathan.domain import SourceError
 
 DATA_SOURCE_ID = "261fdfd6-8a97-81b1-9e23-000bf4245172"
 DATABASE_ID = "261fdfd6-8a97-8060-af8a-f3f29754e96e"
-QUESTION_LOG_DATA_SOURCE_ID = "41dfdfd6-8a97-80f2-addc-000bae8d9225"
 BASE_URL = "https://freellmapi-4ace.srv1395197.hstgr.cloud/v1"
 
 
