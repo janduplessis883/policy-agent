@@ -52,6 +52,7 @@ def test_mandatory_sequence():
     result = agent.ask("What should I do?", [])
     assert sources.calls == ["date", "profile", "inventory", "read"]
     assert "Safety" in result.text
+    assert "✓ Read in full" in result.text
 
 
 def test_profile_failure_stops_before_inventory():
@@ -110,7 +111,7 @@ def test_gap_reads_selected_policies_and_downgrades_incomplete_evidence():
         def respond(self, *args):
             return {
                 "answer": "Missing coverage.",
-                "citations": [],
+                "citations": [{"policy_id": "p", "section": "1"}],
                 "classification": "Confirmed gap",
                 "placeholder_title": "New policy",
             }
@@ -126,6 +127,8 @@ def test_gap_reads_selected_policies_and_downgrades_incomplete_evidence():
     result = Agent(sources, GapModel()).ask("Is coverage missing?", [])
     assert "Potential gap" in result.text
     assert "could not be read" in result.text
+    assert "⚠ Incomplete read" in result.text
+    assert "- Safety\n- Other" in result.text
     assert result.proposal is None
     assert sources.calls == ["profile", "inventory", "read:p", "read:q"]
 

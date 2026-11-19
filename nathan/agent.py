@@ -99,13 +99,6 @@ class Agent:
                     "\n\nNo relevant policy was found in the accessible title and tag inventory. "
                     "Coverage inside differently named policies has not been ruled out."
                 )
-            incomplete = [label(d.title) for d in docs if not d.complete]
-            if incomplete:
-                assessment.answer += (
-                    "\n\nRelevant policies were found but could not be read in full: "
-                    + "; ".join(incomplete)
-                    + ". Unavailable content is not evidence of missing coverage."
-                )
             if set(ids) != set(by_id):
                 assessment.answer += (
                     "\n\nOther policies were not reviewed; this is a topic-focused assessment, "
@@ -124,6 +117,7 @@ class Agent:
     def ask(self, question, history):
         today, profile, inventory, docs, selection, assessment = self._evaluate(question, history)
         by_id = {p.id: p for p in inventory}
+        by_document_id = {d.id: d for d in docs}
         text = assessment.answer
         if assessment.classification:
             text = f"**{assessment.classification}.** {text}"
@@ -137,13 +131,25 @@ class Agent:
             else:
                 p = by_id[c.policy_id]
                 state = "Live" if p.is_live(today) else "Not Live"
-                citation = f"{source_link(p.title, p.public_url)}, {label(c.section)} ({state})"
+                read_status = (
+                    "✓ Read in full" if by_document_id[p.id].complete else "⚠ Incomplete read"
+                )
+                citation = (
+                    f"{source_link(p.title, p.public_url)}, {label(c.section)} "
+                    f"({state}) · {read_status}"
+                )
             if citation not in citations:
                 citations.append(citation)
         if citations:
             text += "\n\n" + "; ".join(citations)
-        if any(not d.complete for d in docs):
-            text += "\n\nSome source content could not be read in full; this assessment is limited."
+        incomplete = [source_link(d.title, by_id[d.id].public_url) for d in docs if not d.complete]
+        if incomplete:
+            text += (
+                "\n\n**⚠ Limited assessment.** These policies could not be read in full:\n\n"
+                + "\n".join(f"- {policy}" for policy in incomplete)
+            )
+            if assessment.classification in {"Confirmed gap", "Potential gap"}:
+                text += "\n\nUnavailable content is not evidence of missing coverage."
         proposal = (
             assessment.placeholder_title
             if (
