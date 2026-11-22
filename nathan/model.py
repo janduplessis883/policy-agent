@@ -16,6 +16,7 @@ class Selection(BaseModel):
     model_config = ConfigDict(extra="forbid")
     operation: Literal["answer", "review", "gap", "placeholder"]
     policy_ids: list[str]
+    resolved_question: str | None = Field(default=None, min_length=1, max_length=8000)
 
 
 class Citation(BaseModel):
@@ -112,7 +113,9 @@ class PolicyModel:
                 if stream:
                     raw, finish, shown = "", None, ""
                     with self.client.chat.completions.create(
-                        model=self.model, messages=messages, stream=True,
+                        model=self.model,
+                        messages=messages,
+                        stream=True,
                         stream_options={"include_usage": True},
                     ) as chunks:
                         for chunk in chunks:
@@ -203,13 +206,46 @@ class PolicyModel:
     def select(self, question, history, inventory):
         self.calls.clear()
         sources = [(f"P{i}", p.id, p.title) for i, p in enumerate(inventory, 1)]
+        previous = next(
+            (
+                message.get("conversation_context", {})
+                for message in reversed(history[-12:])
+                if message.get("role") == "assistant" and message.get("conversation_context")
+            ),
+            {},
+        )
+        previous_ids = {p["id"] for p in previous.get("policies", [])}
+        context = {
+            "question": previous.get("question"),
+            "policies": [
+                {"id": alias, "title": title}
+                for alias, source_id, title in sources
+                if source_id in previous_ids
+            ],
+        }
 
         def validate(result):
             result["policy_ids"] = [self._resolve(ref, sources) for ref in result["policy_ids"]]
             return result
 
         return self._json(
-            "Classify the requested operation; do not answer the question. Select at most 15 "
+            "Classify the requested operation; do not answer the question. First resolve the "
+            "latest question using the chronological conversation history and conversation_context. "
+            "Return resolved_question as a standalone version of the LATEST request, preserving "
+            "its intent and adding only the topic/referent needed to understand it. For example, "
+            "after discussing cold chain, 'Who is responsible for that?' becomes 'Who is "
+            "responsible for the cold chain procedure?'; 'What about out of hours?' asks about "
+            "that same procedure out of hours. 'Make that shorter' requests a shorter account "
+            "of the preceding answer, not a new policy review. Resolve numbered items using "
+            "the preceding answer. Select the policies needed for this resolved request. "
+            "conversation_context contains the previous topic and previously read policies "
+            "mapped to the CURRENT inventory IDs; these are retrieval hints, not evidence. "
+            "An explicit new subject replaces the previous topic; do not carry unrelated policies "
+            "forward. The latest user question takes precedence over older context. If the "
+            "referent is genuinely ambiguous, preserve that ambiguity so the answer stage can "
+            "ask a focused clarification instead of guessing. Do not invent facts or treat "
+            "a previous assistant answer as policy evidence or write authorization. "
+            "Select at most 15 "
             "policy IDs, ordered by relevance, including synonyms and related policies. "
             "Search both titles and tags. Consider ranked_metadata_matches as lexical/synonym "
             "hints, not proof of coverage; add semantically relevant broader policies and "
@@ -222,11 +258,13 @@ class PolicyModel:
             "An explicit request to create a placeholder uses operation placeholder. "
             "A staffing-only question can use an empty policy_ids list "
             "because the Surgery Profile is already retrieved. Example output: "
-            '{"operation":"answer","policy_ids":["P1"]}. '
+            '{"operation":"answer","policy_ids":["P1"],'
+            '"resolved_question":"What is our cold chain procedure?"}. '
             "These are candidate records, not proof of coverage.",
             {
                 "question": question,
-                "history": history[-12:],
+                "history": self._conversation(history),
+                "conversation_context": context,
                 "ranked_metadata_matches": [
                     alias
                     for pid in ranked_policy_ids(question, inventory)
@@ -247,6 +285,15 @@ class PolicyModel:
             Selection,
             validate=validate,
         )
+
+    @staticmethod
+    def _conversation(history):
+        return [
+            {"role": message["role"], "content": message["content"]}
+            for message in history[-12:]
+            if message.get("role") in {"user", "assistant"}
+            and isinstance(message.get("content"), str)
+        ]
 
     def respond(
         self, question, history, today, profile, policies, documents, exhaustive, on_text=None
@@ -280,6 +327,12 @@ class PolicyModel:
         return self._json(
             "The mandatory date/profile/inventory/read sequence is COMPLETE. Answer only from "
             "the supplied evidence. Emit the answer field FIRST so it can be streamed. "
+            "The question may have been resolved from a short follow-up. Use conversation "
+            "history to understand references, requested explanations, formatting changes and "
+            "numbered items, but establish factual claims only from the CURRENT supplied "
+            "profile and documents. Previous assistant answers may be wrong or outdated and "
+            "are not evidence. Recheck names, responsibilities and policy currency. If the "
+            "latest request has an ambiguous referent, ask one focused clarification question. "
             "Citations must use the IDs of supplied documents (P1 etc.) or S0 for the Surgery "
             "Profile. Staffing answers may cite S0 without citing an unrelated policy. "
             "Do not cite unread inventory records. For operational instructions use only Live "
@@ -308,7 +361,7 @@ class PolicyModel:
             "not a tool call. For normal answers classification and placeholder_title are null.",
             {
                 "question": question,
-                "history": history[-12:],
+                "history": self._conversation(history),
                 "today": today,
                 "profile": dict(asdict(profile), id="S0"),
                 "policies": [

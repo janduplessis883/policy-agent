@@ -77,7 +77,9 @@ def test_logs_final_answer_without_losing_it_if_notion_fails(save_fails):
     model = Model()
     model.calls = [("selection-model", 200), ("answer-model", 300)]
     agent = Agent(
-        Sources(), model, on_event=events.append,
+        Sources(),
+        model,
+        on_event=events.append,
         log_answer=lambda *args: log_answer(Client(), *args),
     )
 
@@ -95,7 +97,8 @@ def test_logs_final_answer_without_losing_it_if_notion_fails(save_fails):
     assert props["Model"]["rich_text"][0]["text"]["content"] == "selection-model, answer-model"
     assert props["Tokens used"]["number"] == 500
     assert events[-1] == (
-        "Log Answer · Notion did not confirm the save" if save_fails
+        "Log Answer · Notion did not confirm the save"
+        if save_fails
         else "Log Answer · saved to Notion"
     )
 
@@ -431,3 +434,68 @@ def test_synonym_matches_respect_fifteen_policy_read_limit():
     assert "Potential gap" in result.text
     assert "15" in result.text
     assert result.proposal is None
+
+
+@pytest.mark.parametrize(
+    "question,resolved,policy_id,title",
+    [
+        (
+            "Who is responsible for that?",
+            "Who is responsible for the cold chain procedure?",
+            "cold",
+            "Cold chain",
+        ),
+        (
+            "What about out of hours?",
+            "What is the cold chain procedure out of hours?",
+            "cold",
+            "Cold chain",
+        ),
+        (
+            "Now tell me about complaints instead.",
+            "What is our complaints procedure?",
+            "complaints",
+            "Complaints",
+        ),
+    ],
+)
+def test_followup_search_uses_resolved_topic_and_retains_it_for_next_turn(
+    question,
+    resolved,
+    policy_id,
+    title,
+):
+    sources = Sources()
+    sources.policies = [
+        Policy("cold", "Cold chain", review_date="2027-01-01"),
+        Policy("complaints", "Complaints", review_date="2027-01-01"),
+    ]
+
+    class FollowupModel(Model):
+        def select(self, question, history, inventory):
+            return {
+                "operation": "answer",
+                "policy_ids": [],
+                "resolved_question": resolved,
+            }
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert question == resolved
+            assert [d.id for d in documents] == [policy_id]
+            return {
+                "answer": "Follow the documented procedure.",
+                "citations": [{"policy_id": policy_id, "section": "Responsibilities"}],
+            }
+
+    result = Agent(sources, FollowupModel()).ask(
+        question,
+        [
+            {"role": "user", "content": "What is our cold chain procedure?"},
+            {"role": "assistant", "content": "Follow the cold chain policy."},
+        ],
+    )
+    assert title in result.text
+    assert result.conversation_context == {
+        "question": resolved,
+        "policies": [{"id": policy_id, "title": title}],
+    }

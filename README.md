@@ -154,6 +154,14 @@ in `uv.lock`.
 
 ## Response streaming and tool visibility
 
+Follow-up questions carry a session-local topic and the IDs/titles of previously read
+policies. The selection stage resolves short references such as “Who is responsible for
+that?” into a standalone question before keyword search and answer generation. Previous
+policy IDs are mapped to the current inventory; deleted records are omitted. Explicit
+topic changes replace the earlier scope. Recent chat text helps interpret references,
+but current policy/profile reads remain the evidence for each answer. New chat, logout
+and session expiry clear this context along with the conversation.
+
 Answers stream from the model endpoint using Chat Completions SSE. The interface
 extracts only the answer text from the incremental JSON envelope; raw JSON, source
 records and internal reasoning are not displayed. Final source validation runs before

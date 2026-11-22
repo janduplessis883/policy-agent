@@ -89,7 +89,10 @@ def agent_session(on_event=None, on_text=None):
     model = PolicyModel(settings)
     try:
         yield Agent(
-            Sources(notion), model, on_event=on_event, on_text=on_text,
+            Sources(notion),
+            model,
+            on_event=on_event,
+            on_text=on_text,
             log_answer=partial(log_answer, notion),
         )
     finally:
@@ -196,7 +199,13 @@ if question := st.chat_input("Ask Nathan about surgery policies", max_chars=8000
             status.caption(f"Model: {result.model or 'not reported by endpoint'}")
             status.update(state="complete", expanded=False)
             st.session_state.messages.append(
-                {"role": "assistant", "content": result.text, "tools": tools, "model": result.model}
+                {
+                    "role": "assistant",
+                    "content": result.text,
+                    "tools": tools,
+                    "model": result.model,
+                    "conversation_context": result.conversation_context,
+                }
             )
             if result.proposal and not st.session_state.uncertain_write:
                 st.session_state.pending = {

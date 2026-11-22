@@ -133,3 +133,33 @@ def test_rejected_creation_keeps_proposal_for_retry(monkeypatch):
     assert at.session_state["pending"]["title"] == "ECG Policy"
     assert any("insert content" in m["content"] for m in at.session_state["messages"])
     assert not at.session_state["uncertain_write"]
+
+
+def test_followup_keeps_topic_context_and_new_chat_clears_it(monkeypatch):
+    from nathan.agent import Agent
+    from nathan.domain import Result
+
+    histories = []
+    context = {
+        "question": "What is our cold chain procedure?",
+        "policies": [{"id": "cold", "title": "Cold chain"}],
+    }
+
+    def ask(self, question, history):
+        histories.append(history)
+        result = Result("Follow the cold chain policy.")
+        result.conversation_context = context
+        return result
+
+    monkeypatch.setattr(Agent, "ask", ask)
+    at = app()
+    at.text_input[0].input("123456")
+    at.button[0].click().run()
+    at.chat_input[0].set_value("What is our cold chain procedure?").run()
+    at.chat_input[0].set_value("Who is responsible for that?").run()
+    assert not at.exception
+    assert histories[1][-1].get("conversation_context") == context
+    at.button(key="new_chat").click().run()
+    at.chat_input[0].set_value("Who is responsible?").run()
+    assert not at.exception
+    assert histories[2] == []

@@ -150,14 +150,18 @@ def test_streams_answer_text_and_maps_profile_citation():
             + "\n\n"
         )
         chunks.append(
-            "data: " + json.dumps({
-                "id": "test",
-                "object": "chat.completion.chunk",
-                "created": 0,
-                "model": "routed-answer-model",
-                "choices": [],
-                "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
-            }) + "\n\n"
+            "data: "
+            + json.dumps(
+                {
+                    "id": "test",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "routed-answer-model",
+                    "choices": [],
+                    "usage": {"prompt_tokens": 120, "completion_tokens": 30, "total_tokens": 150},
+                }
+            )
+            + "\n\n"
         )
         chunks.append("data: [DONE]\n\n")
         return httpx.Response(
@@ -250,5 +254,42 @@ def test_gap_response_requires_synopsis_for_agent_advice():
                 [],
                 False,
             )
+    finally:
+        model.close()
+
+
+def test_selector_receives_previous_topic_with_current_inventory_aliases():
+    model, calls = compatible_model(['{"operation":"answer","policy_ids":["P2"]}'])
+    history = [
+        {"role": "user", "content": "What is our cold chain procedure?"},
+        {
+            "role": "assistant",
+            "content": "Follow the cold chain policy.",
+            "tools": ["Read Policy · Cold chain"],
+            "model": "previous-model",
+            "conversation_context": {
+                "question": "What is our cold chain procedure?",
+                "policies": [
+                    {"id": "cold", "title": "Cold chain"},
+                    {"id": "deleted", "title": "Deleted policy"},
+                ],
+            },
+        },
+    ]
+    try:
+        model.select(
+            "Who is responsible for that?",
+            history,
+            [Policy("other", "Complaints"), Policy("cold", "Cold chain")],
+        )
+        payload = json.loads(calls[0]["messages"][1]["content"])
+        assert payload["conversation_context"] == {
+            "question": "What is our cold chain procedure?",
+            "policies": [{"id": "P2", "title": "Cold chain"}],
+        }
+        assert payload["history"] == [
+            {"role": "user", "content": "What is our cold chain procedure?"},
+            {"role": "assistant", "content": "Follow the cold chain policy."},
+        ]
     finally:
         model.close()

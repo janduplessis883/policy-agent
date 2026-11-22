@@ -28,7 +28,9 @@ def source_link(title, url):
 
 
 class Agent:
-    def __init__(self, sources, model, clock=current_date, on_event=None, on_text=None, log_answer=None):
+    def __init__(
+        self, sources, model, clock=current_date, on_event=None, on_text=None, log_answer=None
+    ):
         self.sources, self.model, self.clock = sources, model, clock
         self.on_event = on_event or (lambda _event: None)
         self.on_text = on_text
@@ -45,12 +47,13 @@ class Agent:
             selection = Selection.model_validate(self.model.select(question, history, inventory))
         except ValidationError as exc:
             raise SourceError("The model could not identify a valid policy scope.") from exc
+        resolved_question = (selection.resolved_question or question).strip() or question
         by_id = {p.id: p for p in inventory}
         if any(pid not in by_id for pid in selection.policy_ids):
             raise SourceError("The model referenced an unavailable policy. No action was taken.")
         gap = force_gap or selection.operation in {"gap", "placeholder"}
         selected = list(
-            dict.fromkeys(ranked_policy_ids(question, inventory) + selection.policy_ids)
+            dict.fromkeys(ranked_policy_ids(resolved_question, inventory) + selection.policy_ids)
         )
         selection.policy_ids = selected
         ids = selected
@@ -75,7 +78,7 @@ class Agent:
         try:
             assessment = Assessment.model_validate(
                 self.model.respond(
-                    question,
+                    resolved_question,
                     history,
                     today,
                     profile,
@@ -184,6 +187,10 @@ class Agent:
             model=getattr(self.model, "response_model", None),
             proposal_advice=assessment.placeholder_advice if proposal else None,
             proposal_inventory=list(inventory) if proposal else None,
+            conversation_context={
+                "question": (selection.resolved_question or question).strip() or question,
+                "policies": [{"id": d.id, "title": d.title} for d in docs],
+            },
         )
 
     def create(self, title, advice, inventory):
