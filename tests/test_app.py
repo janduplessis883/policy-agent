@@ -184,3 +184,29 @@ def test_suggestion_button_asks_that_question(monkeypatch):
     assert seen == [("What is our cold chain procedure?", [])]
     assert at.session_state["messages"][0]["content"] == "What is our cold chain procedure?"
     assert "cold chain" in at.session_state["messages"][-1]["content"].casefold()
+
+
+def test_overdue_suggestion_is_labelled_as_the_register(monkeypatch):
+    from nathan.agent import Agent
+    from nathan.domain import Result
+
+    seen = []
+
+    def ask(self, question, history):
+        seen.append(question)
+        return Result(
+            "**Policy register** on 2026-11-25.",
+            source_note="Answered from the policy register, not the language model.",
+        )
+
+    monkeypatch.setattr(Agent, "ask", ask)
+    at = app()
+    at.text_input[0].input("123456")
+    at.button[0].click().run()
+    at.button(key="suggest_overdue").click().run()
+    assert not at.exception
+    assert seen == ["Which policies are overdue?"]
+    assert "Policy register" in at.session_state["messages"][-1]["content"]
+    status = next(e for e in at.status if e.label == "Tool use")
+    assert any("policy register" in c.value.casefold() for c in status.caption)
+    assert all("not reported" not in c.value.casefold() for c in status.caption)

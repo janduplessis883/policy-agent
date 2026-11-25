@@ -10,6 +10,7 @@ from nathan.domain import Document, Result, SourceError
 from nathan.model import Assessment, Selection
 from nathan.passages import section_in_text
 from nathan.policy_search import lexical_policy_ids
+from nathan.register import is_register_question, render_register
 from nathan.tools.create_placeholder import create_placeholder
 from nathan.tools.current_date import current_date
 
@@ -200,6 +201,8 @@ class Agent:
         return today, profile, inventory, docs, selection, assessment
 
     def ask(self, question, history):
+        if is_register_question(question):
+            return self._answer_from_register(question)
         today, profile, inventory, docs, selection, assessment = self._evaluate(question, history)
         by_id = {p.id: p for p in inventory}
         by_document_id = {d.id: d for d in docs}
@@ -236,19 +239,7 @@ class Agent:
         )
         if proposal:
             text += f"\n\nUse Create placeholder to create an empty {label(proposal)} record."
-        if self.log_answer:
-            try:
-                calls = getattr(self.model, "calls", [])
-                models = list(dict.fromkeys(model for model, _ in calls if model))
-                counts = [tokens for _, tokens in calls]
-                total = sum(counts) if counts and None not in counts else None
-                self.log_answer(
-                    question, text, datetime.now(ZoneInfo("Europe/London")), models, total
-                )
-            except Exception:  # noqa: BLE001 -- a log failure must not discard a verified answer
-                self.on_event("Log Answer · Notion did not confirm the save")
-            else:
-                self.on_event("Log Answer · saved to Notion")
+        self._log(question, text)
         return Result(
             text,
             proposal,
@@ -260,6 +251,37 @@ class Agent:
                 "policies": [{"id": d.id, "title": d.title} for d in docs],
             },
         )
+
+    def _answer_from_register(self, question):
+        """Review status for the whole inventory. Dates come from the records, not the model."""
+        self.on_event("Current Date · Europe/London")
+        today = self.clock()
+        self.on_event("Get Surgery Profile")
+        self.sources.profile()
+        self.on_event("List Policies")
+        inventory = self.sources.inventory()
+        self.on_event("Policy register · titles, tags, owners and review dates")
+        text = render_register(question, inventory, today, source_link)
+        self._log(question, text)
+        return Result(
+            text,
+            conversation_context={"question": question.strip(), "policies": []},
+            source_note="Answered from the policy register, not the language model.",
+        )
+
+    def _log(self, question, text):
+        if not self.log_answer:
+            return
+        try:
+            calls = getattr(self.model, "calls", [])
+            models = list(dict.fromkeys(model for model, _ in calls if model))
+            counts = [tokens for _, tokens in calls]
+            total = sum(counts) if counts and None not in counts else None
+            self.log_answer(question, text, datetime.now(ZoneInfo("Europe/London")), models, total)
+        except Exception:  # noqa: BLE001 -- a log failure must not discard a verified answer
+            self.on_event("Log Answer · Notion did not confirm the save")
+        else:
+            self.on_event("Log Answer · saved to Notion")
 
     def create(self, title, advice, inventory):
         """Create the user-authorised proposal using its previously reviewed inventory."""

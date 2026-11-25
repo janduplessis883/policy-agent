@@ -27,7 +27,15 @@ SUGGESTIONS = (
     ("suggest_safeguarding", "Who is responsible for safeguarding?"),
     ("suggest_complaints", "What should I do about a complaint?"),
     ("suggest_infection", "What is our infection control procedure?"),
+    ("suggest_overdue", "Which policies are overdue?"),
 )
+
+
+def tool_caption(model, source_note):
+    if source_note:
+        return source_note
+    return f"Model: {model or 'not reported by endpoint'}"
+
 
 try:
     settings = Settings.from_secrets(st.secrets)
@@ -115,8 +123,8 @@ for message in st.session_state.messages:
             with st.status("Tool use", state="complete", expanded=False):
                 for tool in message.get("tools", []):
                     st.text(tool)
-                if "model" in message:
-                    st.caption(f"Model: {message['model'] or 'not reported by endpoint'}")
+                if message.get("source_note") or "model" in message:
+                    st.caption(tool_caption(message.get("model"), message.get("source_note")))
 
 if not st.session_state.messages:
     st.write("How can I help with surgery policies?")
@@ -207,7 +215,7 @@ if question:
             with agent_session(on_event=report_tool, on_text=show_answer) as agent:
                 result = agent.ask(question, history)
             output.markdown(result.text)
-            status.caption(f"Model: {result.model or 'not reported by endpoint'}")
+            status.caption(tool_caption(result.model, result.source_note))
             status.update(state="complete", expanded=False)
             st.session_state.messages.append(
                 {
@@ -215,6 +223,7 @@ if question:
                     "content": result.text,
                     "tools": tools,
                     "model": result.model,
+                    "source_note": result.source_note,
                     "conversation_context": result.conversation_context,
                 }
             )
