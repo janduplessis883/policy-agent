@@ -1,10 +1,12 @@
 import json
+from datetime import date
 
 import httpx
+import pytest
 from openai import OpenAI
 
 from nathan.config import Settings
-from nathan.domain import Policy
+from nathan.domain import Document, Policy
 from nathan.model import PolicyModel
 
 
@@ -112,10 +114,6 @@ def test_invalid_tool_response_gets_specific_validation_feedback():
 
 
 def test_streams_answer_text_and_maps_profile_citation():
-    from datetime import date
-
-    from nathan.domain import Document
-
     snapshots = []
     payloads = []
     response_parts = [
@@ -179,7 +177,7 @@ def test_streams_answer_text_and_maps_profile_citation():
         "Who is the lead?",
         [],
         date(2026, 11, 16),
-        Document(id="real-profile", title="Profile", text="Lead: Test person"),
+        Document(id="real-profile", title="Profile", text="# Clinical leads\nLead: Test person"),
         [],
         [],
         False,
@@ -291,5 +289,79 @@ def test_selector_receives_previous_topic_with_current_inventory_aliases():
             {"role": "user", "content": "What is our cold chain procedure?"},
             {"role": "assistant", "content": "Follow the cold chain policy."},
         ]
+        assert payload["ranked_metadata_matches"] == ["P2"]
+    finally:
+        model.close()
+
+
+def _long_cold_chain_policy():
+    parts = ["# Purpose\n\nThis policy sets out responsibilities.\n"]
+    parts.append("# Fridge temperatures\n\nRecord the cold chain minimum and maximum every day.\n")
+    for index in range(40):
+        parts.append(f"# Unrelated {index}\n\n" + ("administrative wording " * 40))
+    return "\n".join(parts)
+
+
+def test_long_policy_sent_to_the_model_keeps_matching_sections():
+    captured = {}
+    model = PolicyModel(Settings("test", "test", "123456"))
+
+    def json_stage(instructions, payload, schema, **kwargs):
+        captured["payload"] = payload
+        return kwargs["validate"](
+            {
+                "answer": "Record the fridge temperatures.",
+                "citations": [{"policy_id": "P1", "section": "Fridge temperatures"}],
+                "classification": None,
+                "placeholder_title": None,
+            }
+        )
+
+    model._json = json_stage
+    try:
+        model.respond(
+            "What is the cold chain fridge temperature procedure?",
+            [],
+            date(2026, 11, 16),
+            Document("profile", "Profile", "# Clinical leads\nLead: Test person"),
+            [Policy("p", "Cold chain")],
+            [Document("p", "Cold chain", _long_cold_chain_policy())],
+            False,
+        )
+        document = captured["payload"]["documents"][0]
+        assert document["text_scope"] == "relevant_sections"
+        assert "Fridge temperatures" in document["text"]
+        assert document["omitted_sections"]
+        assert model.excerpted_titles == ["Cold chain"]
+        assert captured["payload"]["profile"]["sections"] == ["Clinical leads"]
+    finally:
+        model.close()
+
+
+def test_response_rejects_a_section_that_is_not_in_the_policy():
+    model = PolicyModel(Settings("test", "test", "123456"))
+
+    def json_stage(instructions, payload, schema, **kwargs):
+        return kwargs["validate"](
+            {
+                "answer": "Call the lead.",
+                "citations": [{"policy_id": "P1", "section": "Imaginary section"}],
+                "classification": None,
+                "placeholder_title": None,
+            }
+        )
+
+    model._json = json_stage
+    try:
+        with pytest.raises(ValueError, match="not found"):
+            model.respond(
+                "Who is the lead?",
+                [],
+                date(2026, 11, 16),
+                Document("profile", "Profile", "# Clinical leads\nLead: Test person"),
+                [Policy("p", "Safety")],
+                [Document("p", "Safety", "# Duties\nCall the lead.")],
+                False,
+            )
     finally:
         model.close()

@@ -24,6 +24,17 @@ FREELLMAPI_SPI_KEY = "your-api-key"
 NOTION_TOKEN = "your-notion-integration-token"
 ```
 
+Two optional settings override the model endpoint. Leave them out to keep the defaults
+(`auto` on the FreeLLMAPI base URL above). `FREELLMAPI_BASE_URL` must be an `https://` URL.
+The same two names can be set as environment variables when they are absent from the secrets
+file. A blank value in the secrets file keeps the default and does not fall through to the
+environment.
+
+```toml
+# FREELLMAPI_BASE_URL = "https://freellmapi-4ace.srv1395197.hstgr.cloud/v1"
+# FREELLMAPI_MODEL = "auto"
+```
+
 The spelling `FREELLMAPI_SPI_KEY` is intentional. Secrets are excluded from git.
 Give the Notion integration access to the Policies database, including read and insert
 content permissions. It needs access to the Surgery Profile and nested policy blocks.
@@ -84,9 +95,13 @@ is withheld from the response model. Reviews may assess non-Live content as such
 Ownership and staff responsibilities remain evidence-based model assessments.
 
 Policy selection combines ranked title/tag keyword and synonym matches with semantic model
-selection. Common terms such as ECG/electrocardiography, cold chain/vaccine storage and
-end-of-life/palliative care are expanded locally. The combined selection reads at most
-15 policies and does not fill empty selections with unrelated inventory records.
+selection. Common terms such as ECG/electrocardiography, cold chain/vaccine storage,
+end-of-life/palliative care, confidentiality, complaints and infection control are expanded
+locally. A single shared word from a multi-word topic (for example "chain" in "cold chain")
+does not by itself select an unrelated policy. Short follow-ups such as "Who is responsible
+for that?" reuse the previous topic when the latest wording has no lexical match of its own.
+The combined selection reads at most 15 policies and does not fill empty selections with
+unrelated inventory records.
 
 Gap requests read at most 15 relevant policies, including broader coverage and existing
 placeholders. Unsupported Confirmed gap assessments are downgraded to Potential gap,
@@ -108,10 +123,14 @@ An uncertain creation disables further writes in that browser session; inspect N
 before starting a new session. External editors can still race a creation because
 Notion does not provide a transactional uniqueness constraint for policy titles.
 
-Answers cite read policy IDs, sections and supplied `public_url` values. A page without
-a public URL is cited by title without fabricating a public link. The model is instructed
-to distinguish formal owners, clinical leads and suggested contacts. All policy advice
-remains model-generated: code validates source IDs, dates and write boundaries, not
+Answers cite read policy IDs, sections and supplied `public_url` values under a **Sources**
+list. A page without a public URL is cited by title without fabricating a public link.
+A cited section that does not appear in the retrieved text is labelled as not found, and
+the model is asked to correct it. An operational answer with no citation is explicitly
+marked as not covered by a cited policy section, so silence in the policies is not presented
+as a procedure. The model is instructed to distinguish formal owners, clinical leads and
+suggested contacts, and not to fill a gap from general knowledge. All policy advice remains
+model-generated: code validates source IDs, section wording, dates and write boundaries, not
 the truth of every sentence or every clinical interpretation.
 
 ## Access and data
@@ -135,9 +154,12 @@ Attachments, child-page links, embedded databases and unknown blocks are flagged
 unread content; they are not silently treated as missing coverage. A profile containing
 such content fails closed. Empty, completely read pages count as empty coverage.
 A document above 180,000 characters or a model request above 350,000 characters stops
-with a scope message instead of silently truncating evidence. The provider's own
-context limit may be smaller. Large collections can therefore exceed the initial
-gap-assessment capacity; no vector search index or document batching is included.
+with a scope message instead of silently truncating evidence. A shorter document that is
+still above 16,000 characters and has Markdown headings is narrowed to the opening section
+and the sections that match the question. The answer says which policy was focused, and
+omitted sections are not treated as missing coverage. If no section matches, the full text
+is still sent. The provider's own context limit may be smaller. Large collections can
+therefore exceed the initial gap-assessment capacity; no vector search index is included.
 
 ## Verify
 
