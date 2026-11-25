@@ -3,7 +3,8 @@ from datetime import UTC, date, datetime
 import pytest
 
 from nathan.auth import PinGuard
-from nathan.domain import Policy
+from nathan.config import BASE_URL, Settings
+from nathan.domain import Policy, SourceError
 from nathan.tools.current_date import current_date
 
 
@@ -26,6 +27,34 @@ def test_london_date_uses_british_summer_time():
 def test_currency(review, tags, expected):
     p = Policy(id="p", title="Test", review_date=review, tags=tags)
     assert p.is_live(date(2026, 11, 16)) is expected
+
+
+def _required_secrets():
+    return {"FREELLMAPI_SPI_KEY": "key", "NOTION_TOKEN": "token", "ACCESS_PIN": "pin"}
+
+
+def test_optional_endpoint_settings_keep_defaults(monkeypatch):
+    monkeypatch.delenv("FREELLMAPI_BASE_URL", raising=False)
+    monkeypatch.delenv("FREELLMAPI_MODEL", raising=False)
+    settings = Settings.from_secrets({**_required_secrets(), "FREELLMAPI_MODEL": "  "})
+    assert settings.base_url == BASE_URL
+    assert settings.model == "auto"
+    monkeypatch.setenv("FREELLMAPI_MODEL", "from-env")
+    monkeypatch.setenv("FREELLMAPI_BASE_URL", "https://example.test/v1")
+    # A blank secret does not fall through to the environment.
+    assert Settings.from_secrets({**_required_secrets(), "FREELLMAPI_MODEL": ""}).model == "auto"
+    overridden = Settings.from_secrets(_required_secrets())
+    assert overridden.model == "from-env"
+    assert overridden.base_url == "https://example.test/v1"
+    explicit = Settings.from_secrets({**_required_secrets(), "FREELLMAPI_MODEL": "named-model"})
+    assert explicit.model == "named-model"
+
+
+def test_insecure_model_url_is_rejected():
+    with pytest.raises(SourceError, match="https"):
+        Settings.from_secrets(
+            {**_required_secrets(), "FREELLMAPI_BASE_URL": "http://example.test/v1"}
+        )
 
 
 def test_pin_throttles_and_does_not_accept_blank():

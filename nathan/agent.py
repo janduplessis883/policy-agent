@@ -8,7 +8,8 @@ from pydantic import ValidationError
 
 from nathan.domain import Document, Result, SourceError
 from nathan.model import Assessment, Selection
-from nathan.policy_search import ranked_policy_ids
+from nathan.passages import section_in_text
+from nathan.policy_search import lexical_policy_ids
 from nathan.tools.create_placeholder import create_placeholder
 from nathan.tools.current_date import current_date
 
@@ -25,6 +26,77 @@ def source_link(title, url):
     if url and url.startswith("https://") and not any(c in url for c in "()<>\n\r "):
         return f"[{safe}]({url})"
     return safe
+
+
+def previous_context_question(history):
+    """The previous resolved topic, or the previous user question when that was not stored."""
+    prior_user = ""
+    found = ""
+    for message in list(history or [])[-12:]:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            prior_user = message["content"].strip()
+        context = message.get("conversation_context")
+        if message.get("role") == "assistant" and isinstance(context, dict):
+            question = context.get("question")
+            if isinstance(question, str) and question.strip():
+                found = question.strip()
+    return found or prior_user
+
+
+def citation_lines(citations, profile, by_id, by_document, today):
+    lines = []
+    unsupported = False
+    for citation in citations:
+        if citation.policy_id == profile.id:
+            shown = (
+                f"{source_link(profile.title, profile.public_url)} · Surgery Profile, "
+                f"{label(citation.section)}"
+            )
+            source_text = profile.text
+        else:
+            policy = by_id[citation.policy_id]
+            state = "Live" if policy.is_live(today) else "Not Live"
+            document = by_document[policy.id]
+            read_status = "✓ Read in full" if document.complete else "⚠ Incomplete read"
+            shown = (
+                f"{source_link(policy.title, policy.public_url)}, {label(citation.section)} "
+                f"({state}) · {read_status}"
+            )
+            source_text = document.text
+        if not section_in_text(citation.section, source_text):
+            unsupported = True
+            shown += " · section not found in retrieved text"
+        if shown not in lines:
+            lines.append(shown)
+    return lines, unsupported
+
+
+def grounding_notes(assessment, unsupported, excerpted):
+    notes = []
+    if unsupported:
+        notes.append(
+            "**Cited section not found.** At least one cited section does not appear "
+            "in the retrieved text. Check the policy before relying on it."
+        )
+    if (
+        assessment.classification in {None, "Covered", "Revision needed"}
+        and not assessment.citations
+    ):
+        notes.append(
+            "**Not covered by a cited policy section.** No retrieved policy or Surgery "
+            "Profile section was cited. Do not treat this reply as written surgery policy."
+        )
+    titles = [title for title in excerpted or [] if isinstance(title, str) and title.strip()]
+    if titles:
+        notes.append(
+            "**Focused read.** These long policies were retrieved in full, but this answer "
+            "used the sections that matched the question: "
+            + "; ".join(label(title) for title in titles)
+            + ". Ask about a named section if you need the rest."
+        )
+    return notes
 
 
 class Agent:
@@ -53,7 +125,14 @@ class Agent:
             raise SourceError("The model referenced an unavailable policy. No action was taken.")
         gap = force_gap or selection.operation in {"gap", "placeholder"}
         selected = list(
-            dict.fromkeys(ranked_policy_ids(resolved_question, inventory) + selection.policy_ids)
+            dict.fromkeys(
+                lexical_policy_ids(
+                    resolved_question,
+                    inventory,
+                    previous_question=previous_context_question(history),
+                )
+                + selection.policy_ids
+            )
         )
         selection.policy_ids = selected
         ids = selected
@@ -127,27 +206,16 @@ class Agent:
         text = assessment.answer
         if assessment.classification:
             text = f"**{assessment.classification}.** {text}"
-        citations = []
-        for c in assessment.citations:
-            if c.policy_id == profile.id:
-                citation = (
-                    f"{source_link(profile.title, profile.public_url)} · Surgery Profile, "
-                    f"{label(c.section)}"
-                )
-            else:
-                p = by_id[c.policy_id]
-                state = "Live" if p.is_live(today) else "Not Live"
-                read_status = (
-                    "✓ Read in full" if by_document_id[p.id].complete else "⚠ Incomplete read"
-                )
-                citation = (
-                    f"{source_link(p.title, p.public_url)}, {label(c.section)} "
-                    f"({state}) · {read_status}"
-                )
-            if citation not in citations:
-                citations.append(citation)
+        citations, unsupported = citation_lines(
+            assessment.citations, profile, by_id, by_document_id, today
+        )
         if citations:
-            text += "\n\n" + "; ".join(citations)
+            text += "\n\n**Sources**\n" + "\n".join(f"- {citation}" for citation in citations)
+        notes = grounding_notes(
+            assessment, unsupported, getattr(self.model, "excerpted_titles", None)
+        )
+        if notes:
+            text += "\n\n" + "\n\n".join(notes)
         incomplete = [source_link(d.title, by_id[d.id].public_url) for d in docs if not d.complete]
         if incomplete:
             text += (
@@ -169,15 +237,15 @@ class Agent:
         if proposal:
             text += f"\n\nUse Create placeholder to create an empty {label(proposal)} record."
         if self.log_answer:
-            calls = self.model.calls
-            models = list(dict.fromkeys(model for model, _ in calls if model))
-            counts = [tokens for _, tokens in calls]
-            total = sum(counts) if counts and None not in counts else None
             try:
+                calls = getattr(self.model, "calls", [])
+                models = list(dict.fromkeys(model for model, _ in calls if model))
+                counts = [tokens for _, tokens in calls]
+                total = sum(counts) if counts and None not in counts else None
                 self.log_answer(
                     question, text, datetime.now(ZoneInfo("Europe/London")), models, total
                 )
-            except SourceError:
+            except Exception:  # noqa: BLE001 -- a log failure must not discard a verified answer
                 self.on_event("Log Answer · Notion did not confirm the save")
             else:
                 self.on_event("Log Answer · saved to Notion")

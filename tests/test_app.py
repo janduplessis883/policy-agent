@@ -163,3 +163,24 @@ def test_followup_keeps_topic_context_and_new_chat_clears_it(monkeypatch):
     at.chat_input[0].set_value("Who is responsible?").run()
     assert not at.exception
     assert histories[2] == []
+
+
+def test_suggestion_button_asks_that_question(monkeypatch):
+    from nathan.agent import Agent
+    from nathan.domain import Result
+
+    seen = []
+
+    def ask(self, question, history):
+        seen.append((question, history))
+        return Result("Follow the cold chain policy.")
+
+    monkeypatch.setattr(Agent, "ask", ask)
+    at = app()
+    at.text_input[0].input("123456")
+    at.button[0].click().run()
+    at.button(key="suggest_cold_chain").click().run()
+    assert not at.exception
+    assert seen == [("What is our cold chain procedure?", [])]
+    assert at.session_state["messages"][0]["content"] == "What is our cold chain procedure?"
+    assert "cold chain" in at.session_state["messages"][-1]["content"].casefold()

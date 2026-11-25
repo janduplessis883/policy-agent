@@ -499,3 +499,98 @@ def test_followup_search_uses_resolved_topic_and_retains_it_for_next_turn(
         "question": resolved,
         "policies": [{"id": policy_id, "title": title}],
     }
+
+
+def test_unresolved_followup_still_reads_the_previous_policy():
+    sources = Sources()
+    sources.policies = [
+        Policy("cold", "Cold chain", review_date="2027-01-01"),
+        Policy("fire", "Fire safety", review_date="2027-01-01"),
+    ]
+
+    class Unresolved(Model):
+        def select(self, question, history, inventory):
+            return {"operation": "answer", "policy_ids": []}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert [document.id for document in documents] == ["cold"]
+            return {
+                "answer": "The cold chain responsibilities are in the policy.",
+                "citations": [{"policy_id": "cold", "section": "1"}],
+            }
+
+    result = Agent(sources, Unresolved()).ask(
+        "Who is responsible for that?",
+        [
+            {"role": "user", "content": "What is our cold chain procedure?"},
+            {"role": "assistant", "content": "Follow the cold chain policy."},
+        ],
+    )
+    assert "Cold chain" in result.text
+    assert "**Sources**" in result.text
+    assert "Not covered by a cited policy section" not in result.text
+
+
+def test_unrelated_question_does_not_reuse_the_previous_topic():
+    sources = Sources()
+    sources.policies = [Policy("cold", "Cold chain", review_date="2027-01-01")]
+
+    class Weather(Model):
+        def select(self, *args):
+            return {"operation": "answer", "policy_ids": []}
+
+        def respond(self, question, history, today, profile, policies, documents, exhaustive):
+            assert documents == []
+            return {"answer": "No weather procedure was retrieved.", "citations": []}
+
+    result = Agent(sources, Weather()).ask(
+        "What is the weather today?",
+        [{"role": "user", "content": "What is our cold chain procedure?"}],
+    )
+    assert "Not covered by a cited policy section" in result.text
+    assert "Cold chain" not in result.text
+
+
+def test_missing_citation_section_is_labelled():
+    class Invented(Model):
+        def respond(self, *args):
+            return {
+                "answer": "Follow safety instructions.",
+                "citations": [{"policy_id": "p", "section": "Imaginary section"}],
+            }
+
+    result = Agent(Sources(), Invented()).ask("What should I do?", [])
+    assert "section not found in retrieved text" in result.text
+    assert "Cited section not found" in result.text
+
+
+def test_cited_answer_lists_sources_without_a_coverage_warning():
+    result = Agent(Sources(), Model(), clock=lambda: date(2026, 11, 16)).ask(
+        "What should I do?", []
+    )
+    assert "**Sources**" in result.text
+    assert "Safety, 1 (Live) · ✓ Read in full" in result.text
+    assert "Not covered by a cited policy section" not in result.text
+    assert "section not found" not in result.text
+
+
+def test_excerpted_policy_is_disclosed_on_the_answer():
+    model = Model()
+    model.excerpted_titles = ["Safety"]
+    result = Agent(Sources(), model).ask("What should I do?", [])
+    assert "Focused read" in result.text
+    assert "Safety" in result.text
+
+
+def test_unexpected_log_failure_keeps_the_answer():
+    events = []
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("token sk-secret should not surface")
+
+    result = Agent(Sources(), Model(), on_event=events.append, log_answer=boom).ask(
+        "What should I do?", []
+    )
+    assert "Safety" in result.text
+    assert events[-1] == "Log Answer · Notion did not confirm the save"
+    assert all("sk-secret" not in event for event in events)

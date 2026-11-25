@@ -22,6 +22,13 @@ st.set_page_config(
 st.title("Nathan")
 st.caption("Stanhope Mews Surgery · Internal policy assistant")
 
+SUGGESTIONS = (
+    ("suggest_cold_chain", "What is our cold chain procedure?"),
+    ("suggest_safeguarding", "Who is responsible for safeguarding?"),
+    ("suggest_complaints", "What should I do about a complaint?"),
+    ("suggest_infection", "What is our infection control procedure?"),
+)
+
 try:
     settings = Settings.from_secrets(st.secrets)
 except (SourceError, FileNotFoundError):
@@ -78,7 +85,8 @@ with st.sidebar:
         st.rerun()
     st.caption(
         "Access expires after 30 minutes without activity. "
-        "Please keep patient-identifiable information out of this chat."
+        "Please keep patient-identifiable information out of this chat. "
+        "Answers name the policy and section. If none is cited, the policies do not cover it."
     )
 
 
@@ -112,10 +120,11 @@ for message in st.session_state.messages:
 
 if not st.session_state.messages:
     st.write("How can I help with surgery policies?")
-    st.caption(
-        "For example: “What is our cold chain procedure?” or "
-        "“Review our complaints policy for unclear responsibilities.”"
-    )
+    st.caption("Choose a starting question, or type your own.")
+    for suggestion_key, suggestion in SUGGESTIONS:
+        if st.button(suggestion, key=suggestion_key):
+            st.session_state.queued_question = suggestion
+            st.rerun()
 
 pending = st.session_state.pending
 if pending and not st.session_state.uncertain_write:
@@ -170,7 +179,9 @@ if st.session_state.uncertain_write:
         "could not be verified. Check the Notion collection before starting another session."
     )
 
-if question := st.chat_input("Ask Nathan about surgery policies", max_chars=8000):
+typed = st.chat_input("Ask Nathan about surgery policies", max_chars=8000)
+question = st.session_state.pop("queued_question", None) or typed
+if question:
     history = list(st.session_state.messages)
     st.session_state.pending = None
     st.session_state.pop("authorise_placeholder", None)
