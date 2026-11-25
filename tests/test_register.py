@@ -91,3 +91,77 @@ def test_empty_inventory_is_explicit():
     text = render_register("How many policies do we have?", [], date(2026, 11, 25), link)
     assert "**0** policies" in text
     assert "no policy records" in text
+
+
+def _page(page_id, **properties):
+    return {"id": page_id, "properties": properties}
+
+
+def test_messy_notion_pages_do_not_break_the_register():
+    from nathan.tools.list_policies import list_policies
+
+    class Client:
+        def query(self, filter=None):
+            return [
+                _page(
+                    "nulls",
+                    Tags=None,
+                    Policy={"title": None},
+                    Review_Date={"date": None},
+                    Status={"type": "status", "status": {"name": None}},
+                    Policy_Owner={"multi_select": [{"name": None}]},
+                ),
+                _page(
+                    "formula",
+                    Policy={"title": [{"plain_text": "Cold chain"}, {"text": None}]},
+                    Tags={"multi_select": [{"name": None}, {"name": "Clinical"}]},
+                    Review_Date={
+                        "type": "formula",
+                        "formula": {"type": "date", "date": {"start": "2020-01-01"}},
+                    },
+                    Policy_Owner={
+                        "type": "people",
+                        "people": [{"name": None}, {"name": "Jan du Plessis"}],
+                    },
+                ),
+                _page(
+                    "uk",
+                    Policy={"type": "title", "title": [{"plain_text": "Complaints"}]},
+                    Review_Date={
+                        "type": "rich_text",
+                        "rich_text": [{"plain_text": "15/03/2019"}],
+                    },
+                ),
+                _page(
+                    "rollup",
+                    Policy={"title": [{"plain_text": "Fire"}]},
+                    Review_Date={
+                        "type": "rollup",
+                        "rollup": {
+                            "type": "array",
+                            "array": [{"type": "date", "date": {"start": "2019-05-01"}}],
+                        },
+                    },
+                ),
+                _page(
+                    "profile",
+                    Tags={"multi_select": [{"name": "SURGERY PROFILE"}]},
+                    Policy={"title": [{"plain_text": "Profile"}]},
+                ),
+                {"not": "a page"},
+            ]
+
+    policies = list_policies(Client())
+    by_id = {policy.id: policy for policy in policies}
+    assert "profile" not in by_id
+    assert by_id["formula"].review_date == "2020-01-01"
+    assert by_id["formula"].tags == ["Clinical"]
+    assert by_id["formula"].owners == ["Jan du Plessis"]
+    assert by_id["uk"].review_date == "15/03/2019"
+    assert by_id["rollup"].review_date == "2019-05-01"
+    assert any(policy.title == "Unreadable record" for policy in policies)
+    text = render_register("Which policies are overdue?", policies, date(2026, 11, 25), link)
+    assert "Cold chain · Overdue · review date 2020-01-01 · Jan du Plessis" in text
+    assert "Complaints · Overdue · review date 2019-03-15" in text
+    assert "Fire · Overdue · review date 2019-05-01" in text
+    assert "Unreadable record" in text

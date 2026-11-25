@@ -1,9 +1,13 @@
+import logging
+import re
 import time
 
 import httpx
 
 from nathan.config import DATA_SOURCE_ID
 from nathan.domain import SourceError, UncertainWrite
+
+logger = logging.getLogger(__name__)
 
 
 class NotionClient:
@@ -49,10 +53,7 @@ class NotionClient:
                             f"Notion rejected placeholder creation (HTTP {response.status_code}). "
                             f"No record was created. {guidance}"
                         )
-                    raise SourceError(
-                        "Notion could not complete the request. Check integration "
-                        "access and the configured database properties."
-                    )
+                    raise _read_error(response)
                 data = response.json()
                 if not isinstance(data, dict):
                     raise TypeError("Invalid response")
@@ -64,9 +65,10 @@ class NotionClient:
                         "collection before trying again."
                     ) from exc
                 if attempt + 1 == attempts:
+                    logger.warning("Notion read failed: %s", _scrub(str(exc)))
                     raise SourceError(
-                        "Notion is unavailable or returned incomplete information. "
-                        "Current policy information could not be verified."
+                        "Notion could not be reached. Check the connection and the "
+                        "integration token, then try again. The details are in the server log."
                     ) from exc
         raise SourceError("Notion rate limit reached. Please try again shortly.")
 
@@ -115,3 +117,36 @@ class NotionClient:
 
     def close(self):
         self.http.close()
+
+
+def _scrub(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = re.sub(r"Bearer\s+\S+", "Bearer [redacted]", text, flags=re.IGNORECASE)
+    text = re.sub(r"(?:secret_|ntn_)[A-Za-z0-9]+", "[redacted]", text)
+    return text
+
+
+def _read_error(response) -> SourceError:
+    status = getattr(response, "status_code", None)
+    body = ""
+    try:
+        body = response.text
+    except Exception:  # noqa: BLE001 -- logging must not raise
+        body = ""
+    logger.warning("Notion read failed HTTP %s: %s", status, _scrub(body)[:500])
+    guidance = {
+        400: "Notion rejected the policy query (HTTP 400). Check the properties "
+        "Policy (title), Tags, Review_Date and Policy_Owner.",
+        401: "Notion rejected the integration token (HTTP 401). Check NOTION_TOKEN.",
+        403: "Notion refused access (HTTP 403). Share the Policies database with the "
+        "integration and allow it to read content.",
+        404: "Notion could not find the policy data source (HTTP 404). Check the data source "
+        "id and that the integration can see the database.",
+        429: "Notion rate limit reached (HTTP 429). Wait briefly and try again.",
+    }.get(
+        status,
+        f"Notion could not complete the read (HTTP {status}). "
+        "Check integration access and the database properties.",
+    )
+    return SourceError(guidance)
