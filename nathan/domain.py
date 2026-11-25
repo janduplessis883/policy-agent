@@ -64,6 +64,7 @@ class Result:
     proposal_advice: str | None = None
     proposal_inventory: list[Policy] | None = None
     conversation_context: dict = field(default_factory=dict)
+    source_note: str | None = None
 
 
 def rich_text(items: list[dict]) -> str:

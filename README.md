@@ -94,6 +94,14 @@ and placeholders remain excluded. For operational answers, non-Live procedure te
 is withheld from the response model. Reviews may assess non-Live content as such.
 Ownership and staff responsibilities remain evidence-based model assessments.
 
+Questions about the register itself — which policies are overdue or due for review, which are
+draft or placeholder, how many policies there are, or a list of the policies held — are answered
+in Python from titles, tags, owners and `Review_Date`. They still require a readable Surgery
+Profile, then the inventory. They do not read policy text and they do not call the language
+model, so a review date cannot be paraphrased. Each status group shows at most 40 titles; the
+counts are always the full inventory. A question about what a policy says, including one that
+mentions a procedure, still uses the normal read-and-answer path.
+
 Policy selection combines ranked title/tag keyword and synonym matches with semantic model
 selection. Common terms such as ECG/electrocardiography, cold chain/vaccine storage,
 end-of-life/palliative care, confidentiality, complaints and infection control are expanded

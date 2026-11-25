@@ -594,3 +594,49 @@ def test_unexpected_log_failure_keeps_the_answer():
     assert "Safety" in result.text
     assert events[-1] == "Log Answer · Notion did not confirm the save"
     assert all("sk-secret" not in event for event in events)
+
+
+def test_overdue_question_uses_the_register_and_does_not_call_the_model():
+    sources = Sources()
+    sources.policies = [
+        Policy("old", "Cold chain", review_date="2020-01-01", owners=["Jan"]),
+        Policy("live", "Infection control", review_date="2027-06-01"),
+    ]
+
+    class Unused(Model):
+        def select(self, *args):
+            raise AssertionError("register questions do not select policies")
+
+        def respond(self, *args):
+            raise AssertionError("register questions do not call the model")
+
+    events = []
+    result = Agent(sources, Unused(), clock=lambda: date(2026, 11, 25), on_event=events.append).ask(
+        "Which policies are overdue?", []
+    )
+    assert sources.calls == ["profile", "inventory"]
+    assert "Read" not in " ".join(events)
+    assert "Cold chain" in result.text
+    assert "review date 2020-01-01" in result.text
+    assert "Infection control" not in result.text
+    assert result.proposal is None
+    assert result.source_note
+    assert result.conversation_context["policies"] == []
+
+
+def test_register_stops_when_the_profile_cannot_be_read():
+    sources = Sources(fail=True)
+
+    class Unused(Model):
+        def select(self, *args):
+            raise AssertionError("profile failure happens before the model")
+
+    with pytest.raises(SourceError):
+        Agent(sources, Unused()).ask("Which policies are overdue?", [])
+    assert sources.calls == ["profile"]
+
+
+def test_procedure_question_still_reads_a_policy():
+    sources = Sources()
+    Agent(sources, Model()).ask("What is our cold chain procedure?", [])
+    assert "read" in sources.calls
