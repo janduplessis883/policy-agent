@@ -4,7 +4,11 @@ from nathan.tools.read_policy import read_policy
 
 def get_surgery_profile(client):
     pages = client.query({"property": "Tags", "multi_select": {"contains": "SURGERY PROFILE"}})
-    active = [p for p in pages if not p.get("archived") and not p.get("in_trash")]
+    active = [
+        page
+        for page in pages
+        if isinstance(page, dict) and not page.get("archived") and not page.get("in_trash")
+    ]
     if len(active) != 1:
         raise SourceError(
             "Current staffing and responsibilities could not be verified: "

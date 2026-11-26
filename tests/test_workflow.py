@@ -636,6 +636,42 @@ def test_register_stops_when_the_profile_cannot_be_read():
     assert sources.calls == ["profile"]
 
 
+def test_overdue_register_survives_null_names():
+    sources = Sources()
+    sources.policies = [
+        Policy("old", "Cold chain", review_date="2020-01-01", tags=[None], owners=[None, "Jan"]),
+        Policy("uk", "Vaccines", review_date="15/01/2020"),
+        Policy("live", "Current", review_date="2027-01-01"),
+    ]
+
+    class Unused(Model):
+        def select(self, *args):
+            raise AssertionError("register questions do not select policies")
+
+    result = Agent(sources, Unused(), clock=lambda: date(2026, 11, 25)).ask(
+        "Which policies are overdue?", []
+    )
+    assert "Cold chain" in result.text
+    assert "review date 2020-01-01" in result.text
+    assert "Jan" in result.text
+    assert "Vaccines" in result.text
+    assert "review date 2020-01-15" in result.text
+    assert "Current" not in result.text
+
+
+def test_unexpected_register_failure_is_specific_and_logged(monkeypatch, caplog):
+    import logging
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("secret_from_parser")
+
+    monkeypatch.setattr("nathan.agent.render_register", boom)
+    with caplog.at_level(logging.ERROR), pytest.raises(SourceError, match="server log") as error:
+        Agent(Sources(), Model()).ask("Which policies are overdue?", [])
+    assert "secret_from_parser" not in str(error.value)
+    assert "secret_from_parser" in caplog.text
+
+
 def test_procedure_question_still_reads_a_policy():
     sources = Sources()
     Agent(sources, Model()).ask("What is our cold chain procedure?", [])

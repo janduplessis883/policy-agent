@@ -1,5 +1,6 @@
 """Run with: streamlit run streamlit_app.py"""
 
+import logging
 import time
 from contextlib import contextmanager
 from functools import partial
@@ -15,6 +16,8 @@ from nathan.model import PolicyModel
 from nathan.notion import NotionClient
 from nathan.sources import Sources
 from nathan.tools.log_answer import log_answer
+
+logger = logging.getLogger("nathan")
 
 st.set_page_config(
     page_title="Nathan | Stanhope Mews Surgery", page_icon=":material/policy:", layout="centered"
@@ -171,7 +174,8 @@ if pending and not st.session_state.uncertain_write:
                 # A rejected write or pre-write check is safe to retry after the issue is fixed.
                 st.session_state.pending = pending
                 st.session_state.messages.append({"role": "assistant", "content": str(exc)})
-            except Exception:  # noqa: BLE001 -- never expose credentials in unexpected errors
+            except Exception:
+                logger.exception("Placeholder creation failed")
                 st.session_state.uncertain_write = True
                 st.session_state.messages.append(
                     {
@@ -239,14 +243,19 @@ if question:
             st.session_state.messages.append(
                 {"role": "assistant", "content": str(exc), "tools": tools}
             )
-        except Exception:  # noqa: BLE001 -- never expose credentials in unexpected errors
+        except Exception:
+            logger.exception("Nathan request failed")
             output.empty()
             status.update(label="Request failed", state="error", expanded=False)
             st.session_state.messages.append(
                 {
                     "role": "assistant",
                     "tools": tools,
-                    "content": "The request could not be completed. Please try again or contact the app administrator.",
+                    "content": (
+                        "The request could not be completed. The details were written to the "
+                        "server log and do not include the API token. Please try again or "
+                        "contact the app administrator."
+                    ),
                 }
             )
     st.rerun()

@@ -1,3 +1,4 @@
+import logging
 import re
 from dataclasses import replace
 from datetime import datetime
@@ -16,6 +17,7 @@ from nathan.tools.current_date import current_date
 
 WRITE_LOCK = Lock()
 MAX_POLICY_READS = 15
+logger = logging.getLogger(__name__)
 
 
 def label(text):
@@ -23,8 +25,12 @@ def label(text):
 
 
 def source_link(title, url):
+    if not isinstance(title, str):
+        title = ""
+    if not isinstance(url, str):
+        url = ""
     safe = label(title)
-    if url and url.startswith("https://") and not any(c in url for c in "()<>\n\r "):
+    if url.startswith("https://") and not any(char in url for char in "()<>\n\r "):
         return f"[{safe}]({url})"
     return safe
 
@@ -254,18 +260,28 @@ class Agent:
 
     def _answer_from_register(self, question):
         """Review status for the whole inventory. Dates come from the records, not the model."""
-        self.on_event("Current Date · Europe/London")
-        today = self.clock()
-        self.on_event("Get Surgery Profile")
-        self.sources.profile()
-        self.on_event("List Policies")
-        inventory = self.sources.inventory()
-        self.on_event("Policy register · titles, tags, owners and review dates")
-        text = render_register(question, inventory, today, source_link)
+        try:
+            self.on_event("Current Date · Europe/London")
+            today = self.clock()
+            self.on_event("Get Surgery Profile")
+            self.sources.profile()
+            self.on_event("List Policies")
+            inventory = self.sources.inventory()
+            self.on_event("Policy register · titles, tags, owners and review dates")
+            text = render_register(question, inventory, today, source_link)
+        except SourceError:
+            raise
+        except Exception as exc:
+            logger.exception("Policy register failed")
+            raise SourceError(
+                "The policy register could not be built from Notion. "
+                "The details were written to the server log and do not include the API token. "
+                "Check that the integration can read the Policies database."
+            ) from exc
         self._log(question, text)
         return Result(
             text,
-            conversation_context={"question": question.strip(), "policies": []},
+            conversation_context={"question": question.strip() or question, "policies": []},
             source_note="Answered from the policy register, not the language model.",
         )
 

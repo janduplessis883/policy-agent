@@ -102,6 +102,12 @@ model, so a review date cannot be paraphrased. Each status group shows at most 4
 counts are always the full inventory. A question about what a policy says, including one that
 mentions a procedure, still uses the normal read-and-answer path.
 
+A single odd Notion record does not discard the register. Missing properties, null tags or
+owner names, formula or rollup dates, rich-text dates and people fields are read when the
+shape is recognised; a value that still cannot be read is listed as missing or unreadable.
+If Notion itself rejects the query, the chat names the HTTP status and the likely permission
+or property problem. The underlying response is written to the server log with tokens removed.
+
 Policy selection combines ranked title/tag keyword and synonym matches with semantic model
 selection. Common terms such as ECG/electrocardiography, cold chain/vaccine storage,
 end-of-life/palliative care, confidentiality, complaints and infection control are expanded

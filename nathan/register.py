@@ -1,8 +1,12 @@
 """Answer register questions from policy metadata, not from model prose."""
 
+import logging
 import re
-from datetime import date, datetime
-from zoneinfo import ZoneInfo
+from datetime import date
+
+from nathan.domain import normalised_tags, review_day
+
+logger = logging.getLogger(__name__)
 
 LIST_LIMIT = 40
 _PROCEDURE = re.compile(r"\b(procedure|how do i|how should i|what should i do|steps to)\b")
@@ -46,40 +50,39 @@ def is_register_question(question):
     )
 
 
-def review_day(policy):
-    """London calendar day, None when missing, False when the stored value cannot be read."""
-    value = policy.review_date or ""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        if "T" in value:
-            return datetime.fromisoformat(value).astimezone(ZoneInfo("Europe/London")).date()
-        return date.fromisoformat(value)
-    except (ValueError, TypeError):
-        return False
-
-
 def policy_status(policy, today):
     """Same Live rule as Policy.is_live, with a label staff can read."""
-    tags = {tag.casefold().strip() for tag in policy.tags}
-    for label, names in _TAG_STATUS:
-        if tags & names:
-            return label
-    if policy.excluded:
-        return "Not in use"
-    day = review_day(policy)
-    if day is None:
-        return "No review date"
-    if day is False:
+    try:
+        tags = normalised_tags(getattr(policy, "tags", None))
+        for label, names in _TAG_STATUS:
+            if tags & names:
+                return label
+        if getattr(policy, "excluded", False):
+            return "Not in use"
+        day = review_day(getattr(policy, "review_date", None))
+        if day is None:
+            return "No review date"
+        if day is False:
+            return "Review date unreadable"
+        if day > today:
+            return "Live"
+        return "Overdue"
+    except Exception:
+        logger.exception("Could not classify policy %s", getattr(policy, "id", None))
         return "Review date unreadable"
-    if day > today:
-        return "Live"
-    return "Overdue"
+
+
+def _row(policy, today):
+    try:
+        return policy, policy_status(policy, today)
+    except Exception:
+        logger.exception("Skipped a policy while building the register")
+        return policy, "Review date unreadable"
 
 
 def render_register(question, inventory, today, link):
     """Exact counts and titles. Dates are not paraphrased by the model."""
-    rows = [(policy, policy_status(policy, today)) for policy in inventory]
+    rows = [_row(policy, today) for policy in inventory or []]
     counts = {status: 0 for status in _GROUPS}
     for _, status in rows:
         counts[status] = counts.get(status, 0) + 1
@@ -107,10 +110,14 @@ def render_register(question, inventory, today, link):
         if not group:
             continue
         lines.extend(["", f"### {status} ({len(group)})"])
-        ordered = sorted(group, key=lambda policy: _sort_key(policy))
+        ordered = sorted(group, key=_sort_key)
         shown = ordered[:LIST_LIMIT]
         for policy in shown:
-            lines.append(_line(policy, status, link))
+            try:
+                lines.append(_line(policy, status, link))
+            except Exception:
+                logger.exception("Could not render policy %s", getattr(policy, "id", None))
+                lines.append("- Unreadable record · Review date unreadable")
         hidden = len(ordered) - len(shown)
         if hidden:
             lines.append(f"- And {hidden} more.")
@@ -128,17 +135,27 @@ def render_register(question, inventory, today, link):
 
 
 def _sort_key(policy):
-    day = review_day(policy)
+    day = review_day(getattr(policy, "review_date", None))
     when = day.toordinal() if isinstance(day, date) else 10**9
-    return (when, (policy.title or "").casefold())
+    title = getattr(policy, "title", "")
+    label = title.casefold() if isinstance(title, str) else ""
+    return (when, label)
 
 
 def _line(policy, status, link):
-    title = (policy.title or "").strip() or "Untitled policy"
-    parts = [link(title, policy.public_url), status]
-    day = review_day(policy)
+    title = getattr(policy, "title", "")
+    title = title.strip() if isinstance(title, str) else ""
+    title = title or "Untitled policy"
+    url = getattr(policy, "public_url", None)
+    parts = [link(title, url if isinstance(url, str) else None), status]
+    day = review_day(getattr(policy, "review_date", None))
     if isinstance(day, date) and status in {"Overdue", "Live"}:
         parts.append(f"review date {day.isoformat()}")
-    if policy.owners:
-        parts.append(", ".join(policy.owners))
+    owners = [
+        owner.strip()
+        for owner in (getattr(policy, "owners", None) or [])
+        if isinstance(owner, str) and owner.strip()
+    ]
+    if owners:
+        parts.append(", ".join(owners))
     return "- " + " · ".join(parts)

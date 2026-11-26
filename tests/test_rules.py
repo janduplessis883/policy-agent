@@ -29,6 +29,15 @@ def test_currency(review, tags, expected):
     assert p.is_live(date(2026, 11, 16)) is expected
 
 
+def test_currency_ignores_null_tags_and_odd_dates():
+    today = date(2026, 11, 16)
+    assert Policy(id="p", title="Test", review_date="2027-01-01", tags=[None, "Clinical"]).is_live(
+        today
+    )
+    assert not Policy(id="p", title="Test", review_date="15/01/2020", tags=None).is_live(today)
+    assert Policy(id="p", title="Test", review_date="01/01/2027").is_live(today)
+
+
 def _required_secrets():
     return {"FREELLMAPI_SPI_KEY": "key", "NOTION_TOKEN": "token", "ACCESS_PIN": "pin"}
 

@@ -1,3 +1,6 @@
+import json
+import logging
+
 import httpx
 import pytest
 
@@ -142,6 +145,66 @@ def test_profile_uses_markdown_reader():
             }
 
     assert "Clinical leads" in get_surgery_profile(Client()).text
+
+
+def test_inventory_paginates_past_one_hundred_messy_records():
+    from datetime import date
+
+    from nathan.register import render_register
+    from nathan.tools.list_policies import list_policies
+
+    pages = []
+    for index in range(101):
+        pages.append(
+            {
+                "id": f"p{index}",
+                "properties": {
+                    "Policy": {"title": [{"plain_text": f"Policy {index}"}]},
+                    "Tags": {"multi_select": None} if index == 50 else {"multi_select": []},
+                    "Review_Date": {"date": {"start": "2020-01-01"}},
+                    "Policy_Owner": {"multi_select": [{"name": None}]},
+                },
+            }
+        )
+
+    def handler(request):
+        body = json.loads(request.content or b"{}")
+        if body.get("start_cursor") == "next":
+            return httpx.Response(200, json={"results": pages[100:], "has_more": False})
+        return httpx.Response(
+            200, json={"results": pages[:100], "has_more": True, "next_cursor": "next"}
+        )
+
+    client = NotionClient("ntn_shouldnotleak", httpx.MockTransport(handler))
+    policies = list_policies(client)
+    assert {policy.id for policy in policies} == {f"p{index}" for index in range(101)}
+    assert policies[50].owners == []
+    text = render_register(
+        "Which policies are overdue?", policies, date(2026, 11, 25), lambda title, url: title
+    )
+    assert "**101** policies. **0** Live. **101** not Live." in text
+    client.close()
+
+
+def test_read_failure_names_the_http_problem_and_hides_secrets(caplog):
+    def handler(request):
+        return httpx.Response(
+            403,
+            json={"message": "private detail secret_frombody", "code": "restricted_resource"},
+        )
+
+    client = NotionClient("ntn_fromheader", httpx.MockTransport(handler))
+    with caplog.at_level(logging.WARNING), pytest.raises(SourceError, match="HTTP 403") as error:
+        client.query()
+    message = str(error.value)
+    assert "read content" in message
+    assert "private detail" not in message
+    assert "ntn_fromheader" not in message
+    assert "secret_frombody" not in message
+    assert "private detail" in caplog.text
+    assert "ntn_fromheader" not in caplog.text
+    assert "secret_frombody" not in caplog.text
+    client.close()
 
 
 def test_listing_requests_only_required_properties_on_every_page():
