@@ -73,6 +73,7 @@ Each agent tool is a separate file:
 | `nathan/tools/current_date.py` | Fresh Europe/London date |
 | `nathan/tools/get_surgery_profile.py` | Exactly one profile tagged SURGERY PROFILE |
 | `nathan/tools/list_policies.py` | Paginated policy inventory and metadata |
+| `nathan/tools/list_overdue_policies.py` | Overdue and due-soon list from that metadata only |
 | `nathan/tools/read_policy.py` | Markdown v2 policy/profile content and truncated-subtree recovery |
 | `nathan/tools/create_placeholder.py` | Restricted creation and read-back verification |
 
@@ -94,13 +95,20 @@ and placeholders remain excluded. For operational answers, non-Live procedure te
 is withheld from the response model. Reviews may assess non-Live content as such.
 Ownership and staff responsibilities remain evidence-based model assessments.
 
-Questions about the register itself — which policies are overdue or due for review, which are
-draft or placeholder, how many policies there are, or a list of the policies held — are answered
-in Python from titles, tags, owners and `Review_Date`. They still require a readable Surgery
-Profile, then the inventory. They do not read policy text and they do not call the language
-model, so a review date cannot be paraphrased. Each status group shows at most 40 titles; the
-counts are always the full inventory. A question about what a policy says, including one that
-mentions a procedure, still uses the normal read-and-answer path.
+Questions about which policies are overdue, out of date, expired, past review, due for review,
+or due within 30 days are answered by `List Overdue Policies` before any model call. That tool
+uses the paginated inventory only: title, owner, review date, status and tags. It does not read
+the Surgery Profile or any policy text, and it is not subject to the 15-policy or response-size
+limit. Live policies whose review date falls in the next 30 days are listed as due soon.
+Wording such as “list all overdue policies” and “show out of date policies” takes this path.
+A how-to question that merely mentions the word overdue, such as what to do if a policy is
+overdue, still uses the normal read-and-answer path.
+
+Other register questions — how many policies there are, a list of the policies held, or which
+are draft or placeholder — are still answered in Python from the same metadata after a readable
+Surgery Profile. They do not call the language model. Each of those status groups shows at most
+40 titles; the counts are always the full inventory. A question about what a policy says still
+uses the normal read-and-answer path.
 
 A single odd Notion record does not discard the register. Missing properties, null tags or
 owner names, formula or rollup dates, rich-text dates and people fields are read when the

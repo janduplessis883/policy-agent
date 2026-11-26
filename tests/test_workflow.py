@@ -614,8 +614,10 @@ def test_overdue_question_uses_the_register_and_does_not_call_the_model():
     result = Agent(sources, Unused(), clock=lambda: date(2026, 11, 25), on_event=events.append).ask(
         "Which policies are overdue?", []
     )
-    assert sources.calls == ["profile", "inventory"]
+    assert sources.calls == ["inventory"]
     assert "Read" not in " ".join(events)
+    assert "List Overdue Policies" in " ".join(events)
+    assert "too large" not in result.text
     assert "Cold chain" in result.text
     assert "review date 2020-01-01" in result.text
     assert "Infection control" not in result.text
@@ -632,7 +634,7 @@ def test_register_stops_when_the_profile_cannot_be_read():
             raise AssertionError("profile failure happens before the model")
 
     with pytest.raises(SourceError):
-        Agent(sources, Unused()).ask("Which policies are overdue?", [])
+        Agent(sources, Unused()).ask("How many policies do we have?", [])
     assert sources.calls == ["profile"]
 
 
@@ -667,7 +669,7 @@ def test_unexpected_register_failure_is_specific_and_logged(monkeypatch, caplog)
 
     monkeypatch.setattr("nathan.agent.render_register", boom)
     with caplog.at_level(logging.ERROR), pytest.raises(SourceError, match="server log") as error:
-        Agent(Sources(), Model()).ask("Which policies are overdue?", [])
+        Agent(Sources(), Model()).ask("How many policies do we have?", [])
     assert "secret_from_parser" not in str(error.value)
     assert "secret_from_parser" in caplog.text
 
