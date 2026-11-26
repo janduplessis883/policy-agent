@@ -11,6 +11,7 @@ import time
 
 import httpx
 
+from nathan.chunks import clean_text, estimate_tokens, split_for_limit
 from nathan.index_sync import EMBEDDING_DIMENSIONS
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 OPENROUTER_EMBEDDINGS_URL = "https://openrouter.ai/api/v1/embeddings"
 DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
 _BATCH_SIZE = 16
+_MAX_BATCH_TOKENS = 8000
 _ATTEMPTS = 4
 _RETRY_STATUSES = {429, 500, 502, 503, 504, 529}
 _BEARER = re.compile(r"Bearer\s+\S+", re.IGNORECASE)
@@ -30,6 +32,8 @@ class Embedder:
         self.model = settings.embedding_model or DEFAULT_EMBEDDING_MODEL
         self.dimensions = EMBEDDING_DIMENSIONS
         self.last_error = ""
+        self._errors: list[str] = []
+        self._status = 0
         self._key = (settings.openrouter_api_key or "").strip()
         self._sleep = sleep or time.sleep
         self._batch_size = batch_size
@@ -39,21 +43,32 @@ class Embedder:
                 "OPENROUTER_API_KEY is not set. Vector search is off; full-text search still runs."
             )
 
-    def embed(self, texts: list[str]) -> list[list[float]] | None:
+    def embed(self, texts: list[str]) -> list[list[float] | None] | None:
+        """One vector per input. A blank or rejected input is None; other inputs still embed."""
         self.last_error = ""
+        self._errors = []
+        self._status = 0
         if not texts:
             return []
         if not self._key:
             self.last_error = "OPENROUTER_API_KEY is not set"
             return None
-        vectors: list[list[float]] = []
-        for start in range(0, len(texts), self._batch_size):
-            batch = texts[start : start + self._batch_size]
-            embedded = self._embed_batch(batch)
-            if embedded is None:
-                return None
-            vectors.extend(embedded)
-        return vectors
+        prepared = [split_for_limit(clean_text(text or "")) for text in texts]
+        jobs = [(index, piece) for index, pieces in enumerate(prepared) for piece in pieces]
+        embedded = self._embed_jobs(jobs)
+        if embedded is None:
+            return None
+        cursor = 0
+        results: list[list[float] | None] = []
+        for pieces in prepared:
+            if not pieces:
+                results.append(None)
+                continue
+            group = embedded[cursor : cursor + len(pieces)]
+            cursor += len(pieces)
+            results.append(None if any(vector is None for vector in group) else _average(group))
+        self.last_error = "; ".join(self._errors)[:500]
+        return results
 
     def embed_one(self, text: str) -> list[float] | None:
         vectors = self.embed([text])
@@ -61,7 +76,34 @@ class Embedder:
             return None
         return vectors[0]
 
+    def _embed_jobs(self, jobs: list[tuple[int, str]]) -> list[list[float] | None] | None:
+        results: list[list[float] | None] = [None] * len(jobs)
+        numbered = list(enumerate(jobs))
+        for batch in _batches(numbered, self._batch_size, _MAX_BATCH_TOKENS):
+            vectors = self._embed_batch([piece for _, (_, piece) in batch])
+            if vectors is None and self._status == 400 and len(batch) > 1:
+                for job_index, (_, piece) in batch:
+                    one = self._embed_batch([piece])
+                    if one is None:
+                        self._note_error(self.last_error)
+                    else:
+                        results[job_index] = one[0]
+                continue
+            if vectors is None and self._status == 400:
+                self._note_error(self.last_error)
+                continue
+            if vectors is None:
+                return None
+            for (job_index, _), vector in zip(batch, vectors):
+                results[job_index] = vector
+        return results
+
+    def _note_error(self, message: str):
+        if message and message not in self._errors:
+            self._errors.append(message)
+
     def _embed_batch(self, texts: list[str]) -> list[list[float]] | None:
+        self._status = 0
         body = self._post(
             {
                 "model": self.model,
@@ -134,12 +176,9 @@ class Embedder:
                 delay = min(delay * 2, 30)
                 continue
             if response.is_error:
-                self.last_error = f"HTTP {response.status_code}"
-                logger.warning(
-                    "OpenRouter embedding HTTP %s: %s",
-                    response.status_code,
-                    _error_detail(response, self._key),
-                )
+                self._status = response.status_code
+                self.last_error = _error_summary(response, self._key)
+                logger.warning("OpenRouter embedding %s", self.last_error)
                 return None
             try:
                 body = response.json()
@@ -167,6 +206,27 @@ class Embedder:
         }
 
 
+def _batches(jobs, max_items: int, max_tokens: int):
+    batch, tokens = [], 0
+    for job in jobs:
+        piece = job[1][1]
+        cost = estimate_tokens(piece)
+        if batch and (len(batch) >= max_items or tokens + cost > max_tokens):
+            yield batch
+            batch, tokens = [], 0
+        batch.append(job)
+        tokens += cost
+    if batch:
+        yield batch
+
+
+def _average(vectors: list[list[float]]) -> list[float]:
+    if len(vectors) == 1:
+        return vectors[0]
+    count = float(len(vectors))
+    return [sum(item[index] for item in vectors) / count for index in range(len(vectors[0]))]
+
+
 def _retry_delay(response, fallback: float) -> float:
     raw = (response.headers.get("retry-after") or "").strip()
     try:
@@ -176,23 +236,37 @@ def _retry_delay(response, fallback: float) -> float:
     return min(max(delay, 0), 30)
 
 
-def _error_detail(response, key: str) -> str:
-    text = ""
+def _error_summary(response, key: str) -> str:
+    """HTTP status plus OpenRouter's code and message, with the key removed."""
+    code, message = "", ""
     try:
         payload = response.json()
     except ValueError:
         payload = None
     if isinstance(payload, dict):
         error = payload.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            text = error["message"]
+        if isinstance(error, dict):
+            raw_code = error.get("code")
+            if raw_code not in (None, ""):
+                code = str(raw_code)
+            if isinstance(error.get("message"), str):
+                message = error["message"]
         elif isinstance(error, str):
-            text = error
+            message = error
         elif isinstance(payload.get("message"), str):
-            text = payload["message"]
-    if not text:
-        text = getattr(response, "text", "") or ""
+            message = payload["message"]
+    if not message:
+        message = getattr(response, "text", "") or ""
+    message = _redact(message, key)[:300]
+    code = _redact(code, key)[:80]
+    if code and message:
+        return f"HTTP {response.status_code}: {code}: {message}"
+    if message:
+        return f"HTTP {response.status_code}: {message}"
+    return f"HTTP {response.status_code}"
+
+
+def _redact(text: str, key: str) -> str:
     if key:
         text = text.replace(key, "[redacted]")
-    text = _BEARER.sub("Bearer [redacted]", text)
-    return text[:300]
+    return _BEARER.sub("Bearer [redacted]", text)

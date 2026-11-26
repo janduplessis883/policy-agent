@@ -102,20 +102,31 @@ class SupabaseStore:
         self._rpc("nathan_index_unlock", {"p_holder": holder})
 
     def fetch_state(self) -> list[dict]:
+        rows = self._get_all(
+            {
+                "select": (
+                    "page_id,chunk_index,content_hash,last_edited_time,"
+                    "embedding_model,embedding_dimensions"
+                ),
+                "order": "page_id.asc,chunk_index.asc",
+            }
+        )
+        missing = {
+            (row.get("page_id"), int(row.get("chunk_index") or 0))
+            for row in self._get_all({"select": "page_id,chunk_index", "embedding": "is.null"})
+        }
+        for row in rows:
+            key = (row.get("page_id"), int(row.get("chunk_index") or 0))
+            row["has_embedding"] = key not in missing
+        return rows
+
+    def _get_all(self, params: dict) -> list[dict]:
         rows, offset = [], 0
         while True:
-            batch = self._get(
-                "policy_chunks",
-                params={
-                    "select": (
-                        "page_id,chunk_index,content_hash,last_edited_time,"
-                        "embedding_model,embedding_dimensions"
-                    ),
-                    "order": "page_id.asc,chunk_index.asc",
-                    "limit": 1000,
-                    "offset": offset,
-                },
-            )
+            page = dict(params)
+            page["limit"] = 1000
+            page["offset"] = offset
+            batch = self._get("policy_chunks", params=page)
             rows.extend(batch)
             if len(batch) < 1000:
                 return rows
