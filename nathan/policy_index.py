@@ -11,6 +11,7 @@ from nathan.fusion import reciprocal_rank_fusion
 from nathan.index_sync import (
     EMBEDDING_DIMENSIONS,
     StoredChunk,
+    format_sync_report,
     plan_sync,
     same_content,
 )
@@ -56,6 +57,7 @@ class Embedder:
 
         self.model = settings.embedding_model
         self.dimensions = EMBEDDING_DIMENSIONS
+        self.last_error = ""
         self._client = OpenAI(
             api_key=settings.api_key,
             base_url=settings.base_url,
@@ -64,16 +66,19 @@ class Embedder:
         )
 
     def embed(self, texts: list[str]) -> list[list[float]] | None:
+        self.last_error = ""
         if not texts:
             return []
         try:
             response = self._client.embeddings.create(model=self.model, input=texts)
         except Exception as exc:  # noqa: BLE001 -- do not log the request; it can carry the key
-            logger.warning("Embedding request failed (%s)", type(exc).__name__)
+            self.last_error = type(exc).__name__
+            logger.warning("Embedding request failed (%s)", self.last_error)
             return None
         ordered = sorted(response.data, key=lambda item: item.index)
         vectors = [list(item.embedding) for item in ordered]
         if any(len(vector) != self.dimensions for vector in vectors):
+            self.last_error = f"{self.model} returned a dimension other than {self.dimensions}"
             logger.warning(
                 "Embedding model %s did not return %s dimensions", self.model, self.dimensions
             )
@@ -137,21 +142,31 @@ class PolicyIndex:
             from nathan.tools.current_date import current_date
 
             today = current_date()
-            refreshed = metadata = 0
+            # None means every changed page. A background pass passes a small limit.
+            counts = {
+                "embedded": 0,
+                "without_embeddings": 0,
+                "metadata": 0,
+                "read_error": 0,
+                "processed": 0,
+            }
+            errors = []
             for policy in plan.refresh:
-                if max_pages is not None and refreshed + metadata >= max_pages:
+                if max_pages is not None and counts["processed"] >= max_pages:
                     break
-                outcome = _store_page(self, policy, grouped.get(policy.id, []), read_policy, today)
-                if outcome == "embedded":
-                    refreshed += 1
-                elif outcome == "metadata":
-                    metadata += 1
+                outcome, detail = _store_page(
+                    self, policy, grouped.get(policy.id, []), read_policy, today
+                )
+                counts["processed"] += 1
+                if outcome in counts:
+                    counts[outcome] += 1
+                if detail:
+                    errors.append(detail)
+                    logger.warning("Index page %s: %s", policy.id, detail.split(":", 1)[-1].strip())
             self.degraded = False
-            return (
-                f"Index update finished. Refreshed {refreshed}, "
-                f"metadata only {metadata}, removed {len(plan.delete_ids)}, "
-                f"already current {len(plan.skip_ids)}."
-            )
+            report = format_sync_report(len(inventory), plan, counts, errors)
+            logger.warning(report)
+            return report
         except IndexUnavailable:
             self.degraded = True
             raise
@@ -190,28 +205,36 @@ def build_index(settings, notion):
     return PolicyIndex(settings, notion)
 
 
-def _store_page(index: PolicyIndex, policy, stored: list[StoredChunk], read_policy, today) -> str:
-    """Return embedded, metadata, or skipped. A failed read or embedding is retried next time."""
+def _store_page(
+    index: PolicyIndex, policy, stored: list[StoredChunk], read_policy, today
+) -> tuple[str, str]:
+    """Return (outcome, detail). Embedding failure still stores the text for full-text search."""
     try:
         document = read_policy(index._notion, policy)
     except Exception as exc:  # noqa: BLE001 -- keep indexing the other pages
-        logger.warning("Could not read page %s for indexing (%s)", policy.id, type(exc).__name__)
-        return "skipped"
+        return "read_error", f"{policy.id}: read failed ({type(exc).__name__})"
     chunks = chunk_policy(policy.title or document.title, document.text)
     if not chunks:
         index._store.delete_pages([policy.id])
-        return "metadata"
+        return "metadata", f"{policy.id}: page had no text"
     model, dims = index._embedder.model, index._embedder.dimensions
     is_live = policy.is_live(today)
     if same_content(chunks, stored, model, dims):
         index._store.touch_page(
             policy.id, policy.title or "", policy.last_edited_time or "", is_live
         )
-        return "metadata"
+        return "metadata", ""
     vectors = index._embedder.embed([chunk.embed_text for chunk in chunks])
-    if vectors is None or len(vectors) != len(chunks):
-        logger.warning("Skipped re-embedding page %s", policy.id)
-        return "skipped"
+    embedded = vectors is not None and len(vectors) == len(chunks)
+    if not embedded:
+        vectors = [None] * len(chunks)
+        stored_model, stored_dims = None, None
+        reason = getattr(index._embedder, "last_error", "") or "no vectors returned"
+        detail = f"{policy.id}: embedding failed ({reason}); stored text only"
+        outcome = "without_embeddings"
+    else:
+        stored_model, stored_dims = model, dims
+        detail, outcome = "", "embedded"
     payload = []
     for chunk, vector in zip(chunks, vectors):
         payload.append(
@@ -223,13 +246,17 @@ def _store_page(index: PolicyIndex, policy, stored: list[StoredChunk], read_poli
                 "content_hash": chunk.content_hash,
                 "last_edited_time": policy.last_edited_time or "",
                 "is_live": is_live,
-                "embedding": "[" + ",".join(f"{value:.6f}" for value in vector) + "]",
-                "embedding_model": model,
-                "embedding_dimensions": dims,
+                "embedding": (
+                    ""
+                    if vector is None
+                    else "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
+                ),
+                "embedding_model": stored_model,
+                "embedding_dimensions": stored_dims,
             }
         )
     index._store.replace_page(policy.id, payload)
-    return "embedded"
+    return outcome, detail
 
 
 def _group(rows: list[dict]) -> dict[str, list[StoredChunk]]:

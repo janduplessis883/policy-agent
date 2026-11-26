@@ -27,6 +27,7 @@ class SyncPlan:
     delete_ids: list[str] = field(default_factory=list)
     refresh: list = field(default_factory=list)
     skip_ids: list[str] = field(default_factory=list)
+    excluded: int = 0
 
 
 def plan_sync(
@@ -42,7 +43,39 @@ def plan_sync(
             skip_ids.append(policy.id)
         else:
             refresh.append(policy)
-    return SyncPlan(delete_ids=delete_ids, refresh=refresh, skip_ids=skip_ids)
+    return SyncPlan(
+        delete_ids=delete_ids,
+        refresh=refresh,
+        skip_ids=skip_ids,
+        excluded=len(policies) - len(kept),
+    )
+
+
+def format_sync_report(inventory: int, plan: SyncPlan, counts: dict, errors: list[str]) -> str:
+    """One sentence the Re-index button can show. A zero result says why."""
+    waiting = max(len(plan.refresh) - counts.get("processed", 0), 0)
+    noun = "page" if inventory == 1 else "pages"
+    text = (
+        f"Index update finished. Notion inventory: {inventory} {noun} "
+        f"({plan.excluded} excluded as archived or draft status, "
+        f"{len(plan.skip_ids)} already current). "
+        f"Embedded {counts.get('embedded', 0)}, "
+        f"stored without embeddings {counts.get('without_embeddings', 0)}, "
+        f"metadata only {counts.get('metadata', 0)}, "
+        f"removed {len(plan.delete_ids)}, "
+        f"read failed {counts.get('read_error', 0)}."
+    )
+    if waiting:
+        text += f" {waiting} changed pages are still waiting for a later pass."
+    if inventory == 0:
+        text += " The inventory query returned no policy pages."
+    if counts.get("without_embeddings"):
+        text += " Embedding failed; full-text search can still use the stored text."
+    if errors:
+        text += " Details: " + "; ".join(errors[:5])
+        if len(errors) > 5:
+            text += f"; and {len(errors) - 5} more."
+    return text
 
 
 def same_content(
