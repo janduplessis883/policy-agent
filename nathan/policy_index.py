@@ -4,6 +4,7 @@ import logging
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from nathan.chunks import chunk_policy
@@ -63,53 +64,67 @@ class PolicyIndex:
 
     def search(self, question, keyword_ids=(), live_only=True) -> list[ChunkHit]:
         # Live answers do not retrieve non-live chunks. Gap and review passes ask for both.
-        started = time.perf_counter()
-        embedding = self._embedder.embed_one(question)
-        embed_s = time.perf_counter() - started
-        if embedding is None:
-            reason = brief(getattr(self._embedder, "last_error", "") or "no vector returned", 120)
-            emit(
-                "Embedding query",
-                f"Query embedding skipped or failed: OpenRouter {self._embedder.model}, "
-                f"{embed_s:.2f}s. {reason}",
+        # Embedding and full-text search use separate clients and do not depend on each
+        # other. Overlap their network waits, while emitting all progress events here on
+        # the calling thread so the Streamlit status panel remains reliable.
+        def timed(call, *args):
+            started = time.perf_counter()
+            result = call(*args)
+            return result, time.perf_counter() - started
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="nathan-search") as pool:
+            embedding_future = pool.submit(timed, self._embedder.embed_one, question)
+            fts_future = pool.submit(
+                timed, self._store.search_fts, question, 30, live_only
             )
-        else:
-            emit(
-                "Embedding query",
-                f"Query embedding: OpenRouter {self._embedder.model}, "
-                f"{len(embedding)} dimensions, {embed_s:.2f}s.",
+            embedding, embed_s = embedding_future.result()
+            if embedding is None:
+                reason = brief(
+                    getattr(self._embedder, "last_error", "") or "no vector returned", 120
+                )
+                emit(
+                    "Embedding query",
+                    f"Query embedding skipped or failed: OpenRouter {self._embedder.model}, "
+                    f"{embed_s:.2f}s. {reason}",
+                )
+            else:
+                emit(
+                    "Embedding query",
+                    f"Query embedding: OpenRouter {self._embedder.model}, "
+                    f"{len(embedding)} dimensions, {embed_s:.2f}s.",
+                )
+            vector_started = time.perf_counter()
+            if embedding is not None:
+                vector_rows = self._store.search_vector(
+                    embedding, 30, live_only, self._embedder.model
+                )
+            else:
+                vector_rows = []
+            # Keep vector-query timing separate from the embedding request that now
+            # overlaps full-text search.
+            vector_s = time.perf_counter() - vector_started
+            if not isinstance(vector_rows, list):
+                vector_rows = []
+            similarity = _top_similarity(vector_rows)
+            similarity_text = (
+                f"top similarity {similarity:.3f}"
+                if similarity is not None
+                else "similarity was not returned"
             )
-        started = time.perf_counter()
-        vector_rows = (
-            self._store.search_vector(embedding, 30, live_only, self._embedder.model)
-            if embedding is not None
-            else []
-        )
-        vector_s = time.perf_counter() - started
-        if not isinstance(vector_rows, list):
-            vector_rows = []
-        similarity = _top_similarity(vector_rows)
-        similarity_text = (
-            f"top similarity {similarity:.3f}"
-            if similarity is not None
-            else "similarity was not returned"
-        )
-        scope = "Live chunks only" if live_only else "Live and non-live chunks"
-        emit(
-            "Searching index: vector",
-            f"Vector search: {len(vector_rows)} hits, {similarity_text}, {scope}, "
-            f"{vector_s:.2f}s. Top: {_titles(vector_rows)}.",
-        )
-        started = time.perf_counter()
-        fts_rows = self._store.search_fts(question, 30, live_only)
-        fts_s = time.perf_counter() - started
-        if not isinstance(fts_rows, list):
-            fts_rows = []
-        emit(
-            "Searching index: full-text",
-            f"Full-text search: {len(fts_rows)} hits, {scope}, {fts_s:.2f}s. "
-            f"Top: {_titles(fts_rows)}.",
-        )
+            scope = "Live chunks only" if live_only else "Live and non-live chunks"
+            emit(
+                "Searching index: vector",
+                f"Vector search: {len(vector_rows)} hits, {similarity_text}, {scope}, "
+                f"{vector_s:.2f}s. Top: {_titles(vector_rows)}.",
+            )
+            fts_rows, fts_s = fts_future.result()
+            if not isinstance(fts_rows, list):
+                fts_rows = []
+            emit(
+                "Searching index: full-text",
+                f"Full-text search: {len(fts_rows)} hits, {scope}, {fts_s:.2f}s. "
+                f"Top: {_titles(fts_rows)}.",
+            )
         keyword_ids = [page_id for page_id in keyword_ids if page_id]
         ranked = fusion_scores([_page_order(vector_rows), _page_order(fts_rows), keyword_ids])
         names = _title_by_id(vector_rows + fts_rows)
@@ -124,7 +139,12 @@ class PolicyIndex:
         if not ranked:
             return []
         chosen = [page_id for page_id, _score in ranked[:20]]
-        hits = [_hit(row) for row in vector_rows + fts_rows if row.get("page_id") in set(chosen)]
+        chosen_set = set(chosen)
+        hits = [
+            _hit(row)
+            for row in vector_rows + fts_rows
+            if row.get("page_id") in chosen_set
+        ]
         before = {(hit.page_id, hit.chunk_index) for hit in hits}
         hits = _with_neighbours(self._store, hits)
         added = [hit for hit in hits if (hit.page_id, hit.chunk_index) not in before]

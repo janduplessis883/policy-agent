@@ -178,6 +178,7 @@ class PolicyModel:
                     on_text("")
                 if stream:
                     raw, finish, shown = "", None, ""
+                    last_partial_chars = 0
                     with self.client.chat.completions.create(
                         model=self.model,
                         messages=messages,
@@ -201,11 +202,14 @@ class PolicyModel:
                                 )
                             if choice.finish_reason:
                                 finish = choice.finish_reason
-                            if on_text:
+                            if on_text and (
+                                len(raw) - last_partial_chars >= 96 or choice.finish_reason
+                            ):
                                 answer = partial_answer(raw)
                                 if answer != shown:
                                     on_text(answer)
                                     shown = answer
+                                last_partial_chars = len(raw)
                 else:
                     response = self.client.chat.completions.create(
                         model=self.model, messages=messages
@@ -373,7 +377,10 @@ class PolicyModel:
     def _conversation(history):
         return [
             {"role": message["role"], "content": message["content"]}
-            for message in history[-12:]
+            # The selector receives the previous resolved topic separately, so sending
+            # six full turns to both model stages adds prompt latency with little value.
+            # Keep four turns for short follow-ups and format requests.
+            for message in history[-8:]
             if message.get("role") in {"user", "assistant"}
             and isinstance(message.get("content"), str)
         ]
