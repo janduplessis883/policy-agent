@@ -271,6 +271,63 @@ def test_excluded_pages_explain_a_zero_refresh(monkeypatch):
     assert "Embedded 0" in text
 
 
+def test_query_search_uses_the_same_embedding_model():
+    class Store:
+        def search_vector(self, embedding, match_count, live_only, embedding_model=""):
+            self.model = embedding_model
+            self.embedding = list(embedding)
+            return [
+                {
+                    "page_id": "p",
+                    "title": "Cold chain",
+                    "section_heading": "Fridge",
+                    "chunk_text": "Record the minimum.",
+                    "chunk_index": 0,
+                    "is_live": True,
+                }
+            ]
+
+        def search_fts(self, *args):
+            return []
+
+        def neighbours(self, *args):
+            return []
+
+    class Emb:
+        model = "openai/text-embedding-3-small"
+
+        def embed_one(self, text):
+            return [0.25]
+
+    index = PolicyIndex.__new__(PolicyIndex)
+    index._store = Store()
+    index._embedder = Emb()
+    hits = index.search("fridge temperatures")
+    assert index._store.model == "openai/text-embedding-3-small"
+    assert index._store.embedding == [0.25]
+    assert hits[0].page_id == "p"
+
+
+def test_vector_query_sends_the_model_to_supabase():
+    import json
+
+    seen = {}
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=[])
+
+    store = SupabaseStore(
+        "https://example.supabase.co",
+        "sb_secret_example",
+        transport=httpx.MockTransport(handler),
+    )
+    store.search_vector([0.1, 0.2], 5, True, "openai/text-embedding-3-small")
+    assert seen["body"]["p_embedding_model"] == "openai/text-embedding-3-small"
+    assert seen["body"]["live_only"] is True
+    store.close()
+
+
 def test_lock_already_held_does_not_look_like_an_empty_inventory():
     index = _index_with([], _Vectors())
 

@@ -62,6 +62,8 @@ def test_optional_endpoint_settings_keep_defaults(monkeypatch):
 def test_supabase_is_optional_and_https_only(monkeypatch):
     monkeypatch.delenv("SUPABASE_URL", raising=False)
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_EMBEDDING_MODEL", raising=False)
     plain = Settings.from_secrets(_required_secrets())
     assert plain.index_enabled is False
     enabled = Settings.from_secrets(
@@ -74,7 +76,23 @@ def test_supabase_is_optional_and_https_only(monkeypatch):
     )
     assert enabled.index_enabled is True
     assert enabled.admin_pin == "admin-pin"
-    assert enabled.embedding_model == "text-embedding-3-small"
+    assert enabled.embedding_model == "openai/text-embedding-3-small"
+    assert enabled.openrouter_api_key == ""
+    assert enabled.model == "auto"
+    chosen = Settings.from_secrets(
+        {
+            **_required_secrets(),
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role",
+            "OPENROUTER_API_KEY": "sk-or-test",
+            "OPENROUTER_EMBEDDING_MODEL": "openai/text-embedding-3-small",
+            "FREELLMAPI_EMBEDDING_MODEL": "auto",
+        }
+    )
+    assert chosen.openrouter_api_key == "sk-or-test"
+    assert chosen.embedding_model == "openai/text-embedding-3-small"
+    assert chosen.model == "auto"
+    assert "freellmapi" in chosen.base_url
     with pytest.raises(SourceError, match="SUPABASE_URL"):
         Settings.from_secrets({**_required_secrets(), "SUPABASE_URL": "http://example.supabase.co"})
 
