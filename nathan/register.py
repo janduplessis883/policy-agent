@@ -10,6 +10,20 @@ logger = logging.getLogger(__name__)
 
 LIST_LIMIT = 40
 _PROCEDURE = re.compile(r"\b(procedure|how do i|how should i|what should i do|steps to)\b")
+_NOT_A_LIST = re.compile(
+    r"("
+    r"\bwhat\s+(?:precise\s+)?actions?\b"
+    r"|\bwhat\s+(?:should|must|do|can)\b"
+    r"|\bhow\s+(?:should|do|can|must)\b"
+    r"|\bprocedure\b"
+    r"|\bsteps?\s+to\b"
+    r"|\bscenario\b"
+    r"|\bpractice manager\b"
+    r"|\breconcile\b"
+    r"|\bbefore closing\b"
+    r")"
+)
+_MAX_CATALOGUE_WORDS = 40
 _CONTENT = re.compile(r"\b(about|on|for|regarding|covering|cover|describe)\b")
 _STATUS_QUESTION = re.compile(r"\b(overdue|due for review|review dates?|policy register)\b")
 _HELD = re.compile(r"\b(drafts?|placeholders?|archived|superseded)\b")
@@ -39,7 +53,9 @@ _GROUPS = (
 def is_register_question(question):
     """True when the staff member is asking about the inventory, not a procedure."""
     text = " ".join((question or "").casefold().split())
-    if not text or _PROCEDURE.search(text):
+    if not text or _PROCEDURE.search(text) or _NOT_A_LIST.search(text):
+        return False
+    if len(text.split()) > _MAX_CATALOGUE_WORDS:
         return False
     if _STATUS_QUESTION.search(text):
         return True

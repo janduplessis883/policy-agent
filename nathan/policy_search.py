@@ -72,7 +72,7 @@ TOPICS = (
         ("blood results", "test results", "abnormal results", "results handling"),
         ("pathology", "laboratory", "results"),
     ),
-    (("safeguarding", "child protection", "adult protection"), ()),
+    (("safeguarding", "safeguarding children", "child protection", "adult protection"), ()),
     (("end of life", "palliative", "eol"), ()),
     (("infection control", "infection prevention", "ipc"), ("hygiene", "ppe")),
     (("repeat prescription", "repeat prescribing"), ("prescribing", "medicines")),
@@ -80,9 +80,33 @@ TOPICS = (
     (("cervical screening", "smear", "smear test"), ("screening",)),
     (("complaint", "complaints", "patient concern"), ()),
     (
-        ("information governance", "confidentiality", "data protection", "gdpr", "caldicott"),
+        (
+            "information governance",
+            "confidentiality",
+            "confidential",
+            "data protection",
+            "gdpr",
+            "caldicott",
+        ),
         ("privacy", "record"),
     ),
+    (
+        ("gillick", "gillick competence", "fraser competence", "young people"),
+        ("confidentiality", "consent"),
+    ),
+    (
+        ("medical record", "medical records", "subject access", "subject access request"),
+        ("record",),
+    ),
+    (
+        ("proxy access", "online proxy"),
+        ("proxy", "online"),
+    ),
+    (
+        ("information governance incident", "data breach"),
+        ("information", "governance"),
+    ),
+    (("duty doctor", "duty gp", "urgent callback", "urgent callbacks"), ("callback", "duty")),
     (("chaperone", "intimate examination"), ("examination",)),
     (("significant event", "learning event"), ("incident",)),
     (("duty of candour", "duty of candor", "candour"), ()),
