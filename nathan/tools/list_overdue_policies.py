@@ -9,7 +9,7 @@ import re
 from datetime import date, timedelta
 
 from nathan.domain import review_day
-from nathan.register import policy_status
+from nathan.register import _NOT_A_LIST, policy_status
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +20,25 @@ DESCRIPTION = (
     "is not limited to 15 policies."
 )
 _PROCEDURE = re.compile(r"\b(procedure|how do i|how should i|what should i do|steps to)\b")
+# A catalogue request, not a mention of the word inside a longer question.
+_LIST_INTENT = re.compile(
+    r"("
+    r"\b(?:list|show|display)\b"
+    r"|\bwhich\s+polic"
+    r"|\bwhat\s+polic"
+    r"|\bhow\s+many\s+polic"
+    r"|\bwhat\s+are\s+the\s+(?:review|overdue|expired|out)"
+    r"|\bpolic(?:y|ies)\s+(?:are|is)\s+(?:overdue|expired|out|due|past)"
+    r"|\bdue\s+for\s+review\b"
+    r"|\bneeds?\s+review(?:ing)?\b"
+    r"|\breview\s+dates?\b"
+    r"|\bdue\s+soon\b"
+    r"|\b(?:next|within)\s+30\s+days\b"
+    r"|\bcoming\s+up\s+for\s+review\b"
+    r"|\bup\s+for\s+review\b"
+    r")"
+)
+_MAX_LIST_WORDS = 40
 _OVERDUE = re.compile(
     r"("
     r"\boverdue\b"
@@ -42,11 +61,19 @@ _UNDATED = {"No review date", "Review date unreadable"}
 
 
 def is_overdue_question(question):
-    """True for an inventory list of policies that are out of date or due soon."""
+    """True only for a short request to list out-of-date or due-soon policies.
+
+    A longer question that merely mentions an expired policy, or asks what to do,
+    is a normal policy answer.
+    """
     text = " ".join((question or "").casefold().split())
-    if not text or _PROCEDURE.search(text):
+    if not text or not _OVERDUE.search(text):
         return False
-    return bool(_OVERDUE.search(text))
+    if _PROCEDURE.search(text) or _NOT_A_LIST.search(text):
+        return False
+    if len(text.split()) > _MAX_LIST_WORDS:
+        return False
+    return bool(_LIST_INTENT.search(text))
 
 
 def list_overdue_policies(inventory, today, question="", link=None):

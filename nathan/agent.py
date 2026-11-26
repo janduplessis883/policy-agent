@@ -12,7 +12,7 @@ from nathan.model import Assessment, Selection
 from nathan.passages import section_in_text
 from nathan.policy_index import NullIndex, documents_from_hits
 from nathan.policy_search import lexical_policy_ids
-from nathan.register import is_register_question, render_register
+from nathan.register import is_register_question, policy_status, render_register
 from nathan.tools.create_placeholder import create_placeholder
 from nathan.tools.current_date import current_date
 from nathan.tools.list_overdue_policies import is_overdue_question, list_overdue_policies
@@ -85,6 +85,28 @@ def citation_lines(citations, profile, by_id, by_document, today):
         if shown not in lines:
             lines.append(shown)
     return lines, unsupported
+
+
+def _currency_note(docs, by_id, today):
+    """Review status for the policies actually used. Not an inventory list."""
+    lines = []
+    for document in docs:
+        policy = by_id.get(document.id)
+        if policy is None:
+            continue
+        status = policy_status(policy, today)
+        if status == "Live":
+            continue
+        when = policy.review_date if isinstance(policy.review_date, str) else ""
+        when = when.strip() or "no review date"
+        lines.append(f"- {label(policy.title or 'Untitled policy')}: {status} (review date {when})")
+    if not lines:
+        return ""
+    return (
+        "\n\n**Review status of policies used.** Taken from Review_Date and tags, "
+        "not from the model. Procedure text from these records is withheld. "
+        "This is not a list of every policy.\n" + "\n".join(lines)
+    )
 
 
 def grounding_notes(assessment, unsupported, excerpted):
@@ -282,6 +304,9 @@ class Agent:
         )
         if notes:
             text += "\n\n" + "\n\n".join(notes)
+        currency = _currency_note(docs, by_id, today)
+        if currency:
+            text += currency
         incomplete = [source_link(d.title, by_id[d.id].public_url) for d in docs if not d.complete]
         if incomplete:
             text += (
