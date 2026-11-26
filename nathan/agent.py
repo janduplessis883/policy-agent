@@ -14,6 +14,7 @@ from nathan.policy_search import lexical_policy_ids
 from nathan.register import is_register_question, render_register
 from nathan.tools.create_placeholder import create_placeholder
 from nathan.tools.current_date import current_date
+from nathan.tools.list_overdue_policies import is_overdue_question, list_overdue_policies
 
 WRITE_LOCK = Lock()
 MAX_POLICY_READS = 15
@@ -207,6 +208,8 @@ class Agent:
         return today, profile, inventory, docs, selection, assessment
 
     def ask(self, question, history):
+        if is_overdue_question(question):
+            return self._answer_overdue(question)
         if is_register_question(question):
             return self._answer_from_register(question)
         today, profile, inventory, docs, selection, assessment = self._evaluate(question, history)
@@ -256,6 +259,33 @@ class Agent:
                 "question": (selection.resolved_question or question).strip() or question,
                 "policies": [{"id": d.id, "title": d.title} for d in docs],
             },
+        )
+
+    def _answer_overdue(self, question):
+        """Out-of-date list from inventory metadata. No profile body, policy text, or model."""
+        try:
+            self.on_event("Current Date · Europe/London")
+            today = self.clock()
+            self.on_event("List Overdue Policies · titles, owners, review dates and tags only")
+            inventory = self.sources.inventory()
+            text = list_overdue_policies(inventory, today, question, source_link)
+        except SourceError:
+            raise
+        except Exception as exc:
+            logger.exception("Overdue policy list failed")
+            raise SourceError(
+                "The overdue policy list could not be built from Notion. "
+                "Policy text was not read. The details were written to the server log "
+                "and do not include the API token."
+            ) from exc
+        self._log(question, text)
+        return Result(
+            text,
+            conversation_context={"question": question.strip() or question, "policies": []},
+            source_note=(
+                "Answered from the overdue-policy list, not the language model. "
+                "Policy text was not read."
+            ),
         )
 
     def _answer_from_register(self, question):
