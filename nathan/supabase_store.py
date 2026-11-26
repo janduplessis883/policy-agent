@@ -1,17 +1,84 @@
 """Supabase REST client for the policy chunk table.
 
-The service role key is sent only as a header. It is never written to a log line.
+The key is sent only as a header. It is never written to a log line.
+New sb_secret_ keys are not JWTs, so they go in the apikey header only.
+A legacy service_role key is a JWT and is also sent as Authorization: Bearer.
 """
 
+import base64
+import json
 import logging
+import re
 
 import httpx
 
 logger = logging.getLogger(__name__)
+_SECRET_IN_TEXT = re.compile(
+    r"(?:Bearer\s+)\S+|sb_secret_[A-Za-z0-9_\-]+|sb_publishable_[A-Za-z0-9_\-]+|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+",
+    re.IGNORECASE,
+)
 
 
 class IndexUnavailable(Exception):
     """The index could not be used. Callers fall back to keyword search."""
+
+
+def is_legacy_jwt(key: str) -> bool:
+    """True for the old anon and service_role keys, which are three-part JWTs."""
+    parts = (key or "").split(".")
+    return len(parts) == 3 and all(parts) and parts[0].startswith("eyJ")
+
+
+def jwt_role(key: str) -> str:
+    """Role claim inside a legacy JWT, or an empty string. The key itself is not logged."""
+    if not is_legacy_jwt(key):
+        return ""
+    payload = key.split(".")[1]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        data = json.loads(base64.urlsafe_b64decode(payload + padding))
+    except (ValueError, json.JSONDecodeError):
+        return ""
+    role = data.get("role") if isinstance(data, dict) else ""
+    return role if isinstance(role, str) else ""
+
+
+def supabase_headers(service_key: str) -> dict[str, str]:
+    """Headers for PostgREST. A non-JWT secret must not be sent as a Bearer token."""
+    key = (service_key or "").strip()
+    headers = {"apikey": key, "Content-Type": "application/json"}
+    lowered = key.lower()
+    if lowered.startswith("sb_publishable_") or jwt_role(key) in {"anon", "authenticated"}:
+        logger.warning(
+            "SUPABASE_SERVICE_ROLE_KEY is a publishable or anon key. "
+            "The index needs the secret key (sb_secret_...) or the legacy service_role JWT. "
+            "A publishable key cannot bypass row level security."
+        )
+    if is_legacy_jwt(key):
+        headers["Authorization"] = f"Bearer {key}"
+    return headers
+
+
+def _scrub(text: str) -> str:
+    return _SECRET_IN_TEXT.sub("[redacted]", text or "")
+
+
+def _postgrest_detail(response) -> str:
+    """PostgREST code, message and hint, with any key material removed."""
+    payload = None
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        bits = []
+        for field in ("code", "message", "hint", "details"):
+            value = payload.get(field)
+            if isinstance(value, str) and value.strip():
+                bits.append(f"{field}={value.strip()}")
+        if bits:
+            return _scrub("; ".join(bits))[:500]
+    return _scrub(getattr(response, "text", "") or "")[:500]
 
 
 class SupabaseStore:
@@ -20,11 +87,7 @@ class SupabaseStore:
         self._client = httpx.Client(
             base_url=self.url + "/rest/v1/",
             timeout=30,
-            headers={
-                "apikey": service_key,
-                "Authorization": f"Bearer {service_key}",
-                "Content-Type": "application/json",
-            },
+            headers=supabase_headers(service_key),
             transport=transport,
         )
 
@@ -113,7 +176,13 @@ class SupabaseStore:
             logger.warning("Policy index request failed (%s)", type(exc).__name__)
             raise IndexUnavailable("Policy index is unavailable") from exc
         if response.is_error:
-            logger.warning("Policy index HTTP %s on %s", response.status_code, path.split("?")[0])
+            detail = _postgrest_detail(response)
+            logger.warning(
+                "Policy index HTTP %s on %s: %s",
+                response.status_code,
+                path.split("?")[0],
+                detail or "no error body",
+            )
             raise IndexUnavailable(f"Policy index returned HTTP {response.status_code}")
         if not response.content:
             return None

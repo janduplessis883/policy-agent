@@ -215,10 +215,10 @@ Do these steps in order. Until the last ones are done, Nathan stays in keyword m
 2. Open the project. In the left sidebar open **Database**, then **Extensions**. Search for **vector** and enable it. If you prefer, the migration below also runs `create extension if not exists vector`.
 3. Open **SQL Editor**, then **New query**.
 4. On your computer, open the file `supabase/migrations/001_policy_chunks.sql` in this project. Select the whole file and copy it.
-5. Paste it into the SQL editor and click **Run**. You should see success, and a table named `policy_chunks`.
+5. Paste it into the SQL editor and click **Run**. You should see success, and a table named `policy_chunks`. If you already ran this file before the 403 fix, also paste and run `supabase/migrations/002_grant_index_functions.sql` the same way. That second file only grants the secret key permission to call the index functions. It does not delete any rows. Then reboot the Streamlit app.
 6. Open **Project Settings** (the gear), then **API** (or **Data API**).
 7. Copy the **Project URL**. It looks like `https://abcdef.supabase.co`.
-8. On the same screen, under **Project API keys**, reveal and copy the **service_role** secret. Do not copy the **anon** or **publishable** key. The service_role key bypasses row level security and must only live in Streamlit secrets, never in the chat page or in git.
+8. On the same screen, under **Project API keys**, copy the **secret** key. It starts with `sb_secret_`. If your project still shows the legacy **service_role** key, that one also works: it is a long value starting with `eyJ`. Do not copy a key starting with `sb_publishable_` and do not copy the **anon** key. The secret key must only live in Streamlit secrets, never in the chat page and never in git.
 9. In Streamlit Community Cloud, open the app, then **Settings**, then **Secrets**. Add these lines under the three secrets you already have. Keep the quotes.
 
 ```toml

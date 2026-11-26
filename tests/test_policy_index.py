@@ -153,13 +153,24 @@ def test_missing_supabase_settings_stay_in_keyword_mode(caplog):
     assert "super-secret-value" not in caplog.text
 
 
-def test_supabase_http_error_does_not_log_the_service_key(caplog):
+def test_supabase_http_error_logs_the_postgrest_body_not_the_key(caplog):
+    seen = {}
+
     def handler(request):
-        return httpx.Response(401, json={"message": "bad key"})
+        seen["apikey"] = request.headers.get("apikey")
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(
+            403,
+            json={
+                "code": "42501",
+                "message": "permission denied for function nathan_try_index_lock",
+                "hint": "Grant execute to service_role. Key was sb_secret_shouldnotappear",
+            },
+        )
 
     store = SupabaseStore(
         "https://example.supabase.co",
-        "service-role-secret-value",
+        "sb_secret_shouldnotappear",
         transport=httpx.MockTransport(handler),
     )
     with caplog.at_level(logging.WARNING):
@@ -168,7 +179,42 @@ def test_supabase_http_error_does_not_log_the_service_key(caplog):
             raised = False
         except IndexUnavailable as exc:
             raised = True
-            assert "service-role-secret-value" not in str(exc)
+            assert "sb_secret_shouldnotappear" not in str(exc)
     assert raised
-    assert "service-role-secret-value" not in caplog.text
+    assert seen["apikey"] == "sb_secret_shouldnotappear"
+    assert seen["authorization"] is None
+    assert "42501" in caplog.text
+    assert "permission denied for function nathan_try_index_lock" in caplog.text
+    assert "sb_secret_shouldnotappear" not in caplog.text
     store.close()
+
+
+def test_legacy_service_role_jwt_is_sent_as_bearer_and_apikey():
+    from nathan.supabase_store import supabase_headers
+
+    legacy = _jwt({"role": "service_role"})
+    headers = supabase_headers(legacy)
+    assert headers["apikey"] == legacy
+    assert headers["Authorization"] == f"Bearer {legacy}"
+
+
+def test_publishable_key_is_not_a_bearer_token_and_is_warned(caplog):
+    from nathan.supabase_store import supabase_headers
+
+    with caplog.at_level(logging.WARNING):
+        headers = supabase_headers("sb_publishable_example")
+    assert headers["apikey"] == "sb_publishable_example"
+    assert "Authorization" not in headers
+    assert "publishable" in caplog.text
+    assert "sb_publishable_example" not in caplog.text
+
+
+def _jwt(payload: dict) -> str:
+    import base64
+    import json
+
+    def part(value):
+        raw = json.dumps(value).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{part({'alg': 'HS256'})}.{part(payload)}.signature"
