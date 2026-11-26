@@ -120,9 +120,11 @@ def test_retry_on_503_and_stop_on_400(caplog):
 
     embedder = Embedder(_Settings(), client=_client(rejected), sleep=lambda _delay: None)
     with caplog.at_level(logging.WARNING):
-        assert embedder.embed(["hello"]) is None
+        assert embedder.embed(["hello"]) == [None]
     assert calls["n"] == 1
-    assert embedder.last_error == "HTTP 400"
+    assert embedder.last_error.startswith("HTTP 400:")
+    assert "bad request" in embedder.last_error
+    assert "sk-or-test" not in embedder.last_error
     assert "sk-or-test" not in caplog.text
 
 
@@ -133,6 +135,72 @@ def test_wrong_dimension_is_rejected():
     embedder = Embedder(_Settings(), client=_client(handler), sleep=lambda _delay: None)
     assert embedder.embed(["hello"]) is None
     assert "1536" in embedder.last_error
+
+
+def test_blank_inputs_are_not_sent():
+    def handler(request):
+        raise AssertionError("blank input must not be posted")
+
+    embedder = Embedder(_Settings(), client=_client(handler), sleep=lambda _delay: None)
+    assert embedder.embed(["", "   ", "\x00"]) == [None, None, None]
+
+
+def test_oversized_input_is_split_before_the_request():
+    from nathan.chunks import EMBED_TOKEN_LIMIT, estimate_tokens
+
+    lengths = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        for item in body["input"]:
+            lengths.append(len(item))
+            assert estimate_tokens(item) <= EMBED_TOKEN_LIMIT
+        data = [
+            {"index": index, "embedding": _vector(1, index)} for index in range(len(body["input"]))
+        ]
+        return httpx.Response(200, json={"data": data})
+
+    embedder = Embedder(_Settings(), client=_client(handler), sleep=lambda _delay: None)
+    vectors = embedder.embed(["y" * 30_000])
+    assert len(lengths) >= 2
+    assert vectors[0] is not None
+    assert len(vectors[0]) == EMBEDDING_DIMENSIONS
+
+
+def test_a_400_on_a_batch_retries_each_chunk(caplog):
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(list(body["input"]))
+        if len(body["input"]) > 1:
+            return httpx.Response(
+                400, json={"error": {"code": "batch", "message": "bad batch sk-or-test"}}
+            )
+        if body["input"][0] == "bad":
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": "invalid_input",
+                        "message": "empty string is not allowed",
+                    }
+                },
+            )
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": _vector(1)}]})
+
+    embedder = Embedder(_Settings(), client=_client(handler), sleep=lambda _delay: None)
+    with caplog.at_level(logging.WARNING):
+        vectors = embedder.embed(["bad", "good"])
+    assert vectors[0] is None
+    assert vectors[1] == _vector(1)
+    assert seen[0] == ["bad", "good"]
+    assert ["bad"] in seen
+    assert ["good"] in seen
+    assert "invalid_input" in embedder.last_error
+    assert "empty string is not allowed" in embedder.last_error
+    assert "sk-or-test" not in embedder.last_error
+    assert "sk-or-test" not in caplog.text
 
 
 def test_missing_openrouter_key_skips_the_request_and_logs(caplog):

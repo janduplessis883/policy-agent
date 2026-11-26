@@ -184,15 +184,17 @@ def _store_page(
         )
         return "metadata", ""
     vectors = index._embedder.embed([chunk.embed_text for chunk in chunks])
-    embedded = vectors is not None and len(vectors) == len(chunks)
-    if not embedded:
+    if not isinstance(vectors, list) or len(vectors) != len(chunks):
         vectors = [None] * len(chunks)
-        stored_model, stored_dims = None, None
+    failed = sum(vector is None for vector in vectors)
+    if failed:
         reason = getattr(index._embedder, "last_error", "") or "no vectors returned"
-        detail = f"{policy.id}: embedding failed ({reason}); stored text only"
+        detail = (
+            f"{policy.id}: embedding failed ({reason}); "
+            f"{failed} of {len(chunks)} chunks stored as text only"
+        )
         outcome = "without_embeddings"
     else:
-        stored_model, stored_dims = model, dims
         detail, outcome = "", "embedded"
     payload = []
     for chunk, vector in zip(chunks, vectors):
@@ -210,8 +212,8 @@ def _store_page(
                     if vector is None
                     else "[" + ",".join(f"{value:.6f}" for value in vector) + "]"
                 ),
-                "embedding_model": stored_model,
-                "embedding_dimensions": stored_dims,
+                "embedding_model": None if vector is None else model,
+                "embedding_dimensions": None if vector is None else dims,
             }
         )
     index._store.replace_page(policy.id, payload)
@@ -231,6 +233,7 @@ def _group(rows: list[dict]) -> dict[str, list[StoredChunk]]:
                 last_edited_time=row.get("last_edited_time"),
                 embedding_model=row.get("embedding_model"),
                 embedding_dimensions=row.get("embedding_dimensions"),
+                has_embedding=row.get("has_embedding", True) is not False,
             )
         )
     return grouped

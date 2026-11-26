@@ -20,6 +20,7 @@ class StoredChunk:
     last_edited_time: str | None = None
     embedding_model: str | None = None
     embedding_dimensions: int | None = None
+    has_embedding: bool = True
 
 
 @dataclass
@@ -28,6 +29,7 @@ class SyncPlan:
     refresh: list = field(default_factory=list)
     skip_ids: list[str] = field(default_factory=list)
     excluded: int = 0
+    unembedded: int = 0
 
 
 def plan_sync(
@@ -37,17 +39,21 @@ def plan_sync(
     kept_ids = {policy.id for policy in kept}
     delete_ids = [page_id for page_id in grouped if page_id not in kept_ids]
     refresh, skip_ids = [], []
+    unembedded = 0
     for policy in kept:
         rows = grouped.get(policy.id, [])
         if _already_current(policy, rows, model, dimensions):
             skip_ids.append(policy.id)
         else:
             refresh.append(policy)
+            if rows and any(not row.has_embedding for row in rows):
+                unembedded += 1
     return SyncPlan(
         delete_ids=delete_ids,
         refresh=refresh,
         skip_ids=skip_ids,
         excluded=len(policies) - len(kept),
+        unembedded=unembedded,
     )
 
 
@@ -67,6 +73,10 @@ def format_sync_report(inventory: int, plan: SyncPlan, counts: dict, errors: lis
     )
     if waiting:
         text += f" {waiting} changed pages are still waiting for a later pass."
+    if plan.unembedded:
+        noun_again = "page" if plan.unembedded == 1 else "pages"
+        verb = "was" if plan.unembedded == 1 else "were"
+        text += f" {plan.unembedded} {noun_again} had no embedding and {verb} included again."
     if inventory == 0:
         text += " The inventory query returned no policy pages."
     if counts.get("without_embeddings"):
@@ -91,6 +101,8 @@ def same_content(
             return False
         if row.embedding_model != model or row.embedding_dimensions != dimensions:
             return False
+        if not row.has_embedding:
+            return False
     return True
 
 
@@ -102,5 +114,6 @@ def _already_current(policy, rows: list[StoredChunk], model: str, dimensions: in
         (row.last_edited_time or "") == edited
         and row.embedding_model == model
         and row.embedding_dimensions == dimensions
+        and row.has_embedding
         for row in rows
     )

@@ -328,6 +328,84 @@ def test_vector_query_sends_the_model_to_supabase():
     store.close()
 
 
+def test_a_text_only_page_is_embedded_again_even_when_notion_is_unchanged(monkeypatch):
+    from nathan.chunks import chunk_policy
+
+    policy = Policy(
+        "p0",
+        "Cold chain",
+        review_date="2027-01-01",
+        last_edited_time="2026-06-01T00:00:00Z",
+    )
+    _patch_sources(monkeypatch, [policy])
+    chunks = chunk_policy(policy.title, "# Fridge temperatures\nRecord the minimum every day.")
+    index = _index_with([policy], _Vectors())
+
+    def stored(has_embedding):
+        return [
+            {
+                "page_id": "p0",
+                "chunk_index": chunk.chunk_index,
+                "content_hash": chunk.content_hash,
+                "last_edited_time": policy.last_edited_time,
+                "embedding_model": "text-embedding-3-small",
+                "embedding_dimensions": 1536,
+                "has_embedding": has_embedding,
+            }
+            for chunk in chunks
+        ]
+
+    index._store.fetch_state = lambda: stored(False)
+    text = index.sync_incremental(max_pages=None)
+    assert "0 already current" in text
+    assert "Embedded 1" in text
+    assert "1 page had no embedding and was included again" in text
+    assert index.saved
+
+    index.saved.clear()
+    index._store.fetch_state = lambda: stored(True)
+    text = index.sync_incremental(max_pages=None)
+    assert "1 already current" in text
+    assert "Embedded 0" in text
+    assert index.saved == []
+
+
+def test_fetch_state_marks_chunks_whose_embedding_is_null():
+    def handler(request):
+        if request.url.params.get("embedding") == "is.null":
+            return httpx.Response(200, json=[{"page_id": "a", "chunk_index": 0}])
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "page_id": "a",
+                    "chunk_index": 0,
+                    "content_hash": "h",
+                    "last_edited_time": "t",
+                    "embedding_model": "openai/text-embedding-3-small",
+                    "embedding_dimensions": 1536,
+                },
+                {
+                    "page_id": "b",
+                    "chunk_index": 0,
+                    "content_hash": "h2",
+                    "last_edited_time": "t",
+                    "embedding_model": "openai/text-embedding-3-small",
+                    "embedding_dimensions": 1536,
+                },
+            ],
+        )
+
+    store = SupabaseStore(
+        "https://example.supabase.co",
+        "sb_secret_example",
+        transport=httpx.MockTransport(handler),
+    )
+    rows = {row["page_id"]: row["has_embedding"] for row in store.fetch_state()}
+    assert rows == {"a": False, "b": True}
+    store.close()
+
+
 def test_lock_already_held_does_not_look_like_an_empty_inventory():
     index = _index_with([], _Vectors())
 

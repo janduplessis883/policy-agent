@@ -33,6 +33,37 @@ def test_plan_skips_current_pages_and_deletes_missing_ones():
     assert set(plan.delete_ids) == {"gone", "old"}
 
 
+def test_a_page_with_a_null_embedding_is_not_already_current():
+    policy = Policy("p", "Cold chain", last_edited_time="2026-01-01T00:00:00Z")
+    stored = {
+        "p": [
+            StoredChunk(
+                0,
+                "abc",
+                last_edited_time="2026-01-01T00:00:00Z",
+                embedding_model="openai/text-embedding-3-small",
+                embedding_dimensions=1536,
+                has_embedding=False,
+            )
+        ]
+    }
+    plan = plan_sync([policy], stored, "openai/text-embedding-3-small", 1536)
+    assert plan.skip_ids == []
+    assert [item.id for item in plan.refresh] == ["p"]
+    assert plan.unembedded == 1
+    different_model = StoredChunk(
+        0,
+        "abc",
+        last_edited_time="2026-01-01T00:00:00Z",
+        embedding_model="text-embedding-3-small",
+        embedding_dimensions=1536,
+        has_embedding=True,
+    )
+    plan = plan_sync([policy], {"p": [different_model]}, "openai/text-embedding-3-small", 1536)
+    assert plan.skip_ids == []
+    assert plan.unembedded == 0
+
+
 def test_same_words_are_not_reembedded_but_a_new_model_is():
     chunks = chunk_policy("Cold chain", "# Fridge temperatures\n\nRecord the minimum daily.")
     stored = [
@@ -46,6 +77,8 @@ def test_same_words_are_not_reembedded_but_a_new_model_is():
     ]
     assert same_content(chunks, stored, "text-embedding-3-small", 1536)
     assert not same_content(chunks, stored, "other-model", 1536)
+    stored[0].has_embedding = False
+    assert not same_content(chunks, stored, "text-embedding-3-small", 1536)
 
 
 def _row(edited):
