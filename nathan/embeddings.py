@@ -11,7 +11,7 @@ import time
 
 import httpx
 
-from nathan.chunks import clean_text, estimate_tokens, split_for_limit
+from nathan.chunks import clean_text, count_tokens, split_for_limit, split_in_half
 from nathan.index_sync import EMBEDDING_DIMENSIONS
 
 logger = logging.getLogger(__name__)
@@ -83,20 +83,39 @@ class Embedder:
             vectors = self._embed_batch([piece for _, (_, piece) in batch])
             if vectors is None and self._status == 400 and len(batch) > 1:
                 for job_index, (_, piece) in batch:
-                    one = self._embed_batch([piece])
-                    if one is None:
+                    vector = self._embed_resilient(piece)
+                    if vector is None:
                         self._note_error(self.last_error)
                     else:
-                        results[job_index] = one[0]
+                        results[job_index] = vector
                 continue
             if vectors is None and self._status == 400:
-                self._note_error(self.last_error)
+                vector = self._embed_resilient(batch[0][1][1], known_failure=True)
+                if vector is None:
+                    self._note_error(self.last_error)
+                else:
+                    results[batch[0][0]] = vector
                 continue
             if vectors is None:
                 return None
             for (job_index, _), vector in zip(batch, vectors):
                 results[job_index] = vector
         return results
+
+    def _embed_resilient(self, piece: str, depth: int = 0, known_failure: bool = False):
+        """Embed one piece. A 'maximum input length' 400 is split in half and retried."""
+        if not known_failure:
+            one = self._embed_batch([piece])
+            if one is not None:
+                return one[0]
+        if self._status == 400 and depth < 12 and _is_length_error(self.last_error):
+            left, right = split_in_half(piece)
+            if left and right and left != piece and right != piece:
+                first = self._embed_resilient(left, depth + 1)
+                second = self._embed_resilient(right, depth + 1)
+                if first is not None and second is not None:
+                    return _average([first, second])
+        return None
 
     def _note_error(self, message: str):
         if message and message not in self._errors:
@@ -210,7 +229,7 @@ def _batches(jobs, max_items: int, max_tokens: int):
     batch, tokens = [], 0
     for job in jobs:
         piece = job[1][1]
-        cost = estimate_tokens(piece)
+        cost = count_tokens(piece)
         if batch and (len(batch) >= max_items or tokens + cost > max_tokens):
             yield batch
             batch, tokens = [], 0
@@ -225,6 +244,28 @@ def _average(vectors: list[list[float]]) -> list[float]:
         return vectors[0]
     count = float(len(vectors))
     return [sum(item[index] for item in vectors) / count for index in range(len(vectors[0]))]
+
+
+def _is_length_error(message: str) -> bool:
+    return "maximum input length" in (message or "").casefold()
+
+
+_STATUS_ECHO = re.compile(r"^(?:http\s+)?(\d{3})\s*:\s*", re.IGNORECASE)
+
+
+def _strip_status_echo(text: str, status: int) -> str:
+    """Remove a provider message that already starts with this HTTP status."""
+    cleaned = (text or "").strip()
+    while True:
+        match = _STATUS_ECHO.match(cleaned)
+        if match is None or int(match.group(1)) != status:
+            return cleaned
+        cleaned = cleaned[match.end() :].strip()
+
+
+def _code_is_status(code: str, status: int) -> bool:
+    folded = code.strip().casefold()
+    return folded in {str(status), f"http {status}"}
 
 
 def _retry_delay(response, fallback: float) -> float:
@@ -257,10 +298,12 @@ def _error_summary(response, key: str) -> str:
             message = payload["message"]
     if not message:
         message = getattr(response, "text", "") or ""
-    message = _redact(message, key)[:300]
-    code = _redact(code, key)[:80]
-    if code and message:
+    message = _strip_status_echo(_redact(message, key), response.status_code)[:300]
+    code = _strip_status_echo(_redact(code, key), response.status_code)[:80]
+    if code and not _code_is_status(code, response.status_code) and message:
         return f"HTTP {response.status_code}: {code}: {message}"
+    if code and not _code_is_status(code, response.status_code):
+        return f"HTTP {response.status_code}: {code}"
     if message:
         return f"HTTP {response.status_code}: {message}"
     return f"HTTP {response.status_code}"
