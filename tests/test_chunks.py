@@ -46,8 +46,25 @@ def test_blank_and_illegal_characters_are_not_embedded():
     assert "\ud800" not in surrogates[0].embed_text
 
 
-def test_a_dense_chunk_is_split_under_the_token_limit():
-    blob = "x" * 30_000
+def test_token_count_falls_back_to_about_two_characters(monkeypatch):
+    from nathan import chunks
+
+    monkeypatch.setattr(chunks, "_encoder_failed", True)
+    monkeypatch.setattr(chunks, "_encoder", None)
+    text = "a" * 20_000
+    assert chunks.count_tokens(text) == 10_000
+    parts = chunks.split_for_limit(text, 8000)
+    assert len(parts) >= 2
+    assert all(len(part) <= 16_000 for part in parts)
+
+
+def test_a_dense_chunk_over_8192_tokens_is_split_on_token_boundaries():
+    import tiktoken
+
+    encoder = tiktoken.get_encoding("cl100k_base")
+    blob = "字" * 12_000
+    assert len(encoder.encode(blob)) > 8192
     chunks = chunk_policy("Cold chain", f"# Fridge temperatures\n\n{blob}")
     assert len(chunks) >= 2
+    assert all(len(encoder.encode(chunk.embed_text)) <= 8000 for chunk in chunks)
     assert all(estimate_tokens(chunk.embed_text) <= EMBED_TOKEN_LIMIT for chunk in chunks)

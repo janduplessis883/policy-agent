@@ -161,7 +161,7 @@ def test_oversized_input_is_split_before_the_request():
         return httpx.Response(200, json={"data": data})
 
     embedder = Embedder(_Settings(), client=_client(handler), sleep=lambda _delay: None)
-    vectors = embedder.embed(["y" * 30_000])
+    vectors = embedder.embed(["字" * 12_000])
     assert len(lengths) >= 2
     assert vectors[0] is not None
     assert len(vectors[0]) == EMBEDDING_DIMENSIONS
@@ -201,6 +201,64 @@ def test_a_400_on_a_batch_retries_each_chunk(caplog):
     assert "empty string is not allowed" in embedder.last_error
     assert "sk-or-test" not in embedder.last_error
     assert "sk-or-test" not in caplog.text
+
+
+def test_a_length_400_is_split_in_half_and_the_status_prefix_is_not_repeated():
+    from nathan.embeddings import _error_summary
+
+    class Response:
+        status_code = 400
+
+        def json(self):
+            return {
+                "error": {
+                    "code": 400,
+                    "message": "HTTP 400: Invalid 'input[0]': maximum input length is 8192 tokens.",
+                }
+            }
+
+    summary = _error_summary(Response(), "sk-or-test")
+    assert summary.count("HTTP 400") == 1
+    assert "400: 400" not in summary
+    assert "Invalid 'input[0]'" in summary
+
+    calls = []
+
+    def handler(request):
+        import json
+
+        body = json.loads(request.content)
+        text = body["input"][0] if isinstance(body["input"], list) else body["input"]
+        calls.append(text)
+        if len(text) > 80:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "code": 400,
+                        "message": "HTTP 400: Invalid 'input[0]': maximum input length is 8192 tokens.",
+                    }
+                },
+            )
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": _vector(1)}]})
+
+    embedder = Embedder(_Settings(), client=_client(handler), sleep=lambda _delay: None)
+    embedder_module = __import__("nathan.embeddings", fromlist=["split_for_limit"])
+    original = embedder_module.split_for_limit
+    embedder_module.split_for_limit = lambda text, max_tokens=8000: (
+        [text] if str(text).strip() else []
+    )
+    try:
+        vectors = embedder.embed(["z" * 200])
+    finally:
+        embedder_module.split_for_limit = original
+    assert vectors[0] is not None
+    assert len(vectors[0]) == EMBEDDING_DIMENSIONS
+    assert calls[0] == "z" * 200
+    assert len(calls) > 1
+    assert min(len(text) for text in calls) < len(calls[0])
+    assert "HTTP 400: 400" not in embedder.last_error
+    assert embedder.last_error.count("HTTP 400") <= 1
 
 
 def test_missing_openrouter_key_skips_the_request_and_logs(caplog):
