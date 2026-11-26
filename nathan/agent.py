@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from nathan.domain import Document, Result, SourceError
 from nathan.model import Assessment, Selection
 from nathan.passages import section_in_text
+from nathan.policy_index import NullIndex, documents_from_hits
 from nathan.policy_search import lexical_policy_ids
 from nathan.register import is_register_question, render_register
 from nathan.tools.create_placeholder import create_placeholder
@@ -67,7 +68,12 @@ def citation_lines(citations, profile, by_id, by_document, today):
             policy = by_id[citation.policy_id]
             state = "Live" if policy.is_live(today) else "Not Live"
             document = by_document[policy.id]
-            read_status = "✓ Read in full" if document.complete else "⚠ Incomplete read"
+            if getattr(document, "indexed", False):
+                read_status = "Indexed sections"
+            elif document.complete:
+                read_status = "✓ Read in full"
+            else:
+                read_status = "⚠ Incomplete read"
             shown = (
                 f"{source_link(policy.title, policy.public_url)}, {label(citation.section)} "
                 f"({state}) · {read_status}"
@@ -109,12 +115,41 @@ def grounding_notes(assessment, unsupported, excerpted):
 
 class Agent:
     def __init__(
-        self, sources, model, clock=current_date, on_event=None, on_text=None, log_answer=None
+        self,
+        sources,
+        model,
+        clock=current_date,
+        on_event=None,
+        on_text=None,
+        log_answer=None,
+        index=None,
     ):
         self.sources, self.model, self.clock = sources, model, clock
         self.on_event = on_event or (lambda _event: None)
         self.on_text = on_text
         self.log_answer = log_answer
+        self.index = index if index is not None else NullIndex()
+
+    def _read_one(self, policy):
+        self.on_event(f"Read Policy · {policy.title}")
+        try:
+            return self.sources.read(policy)
+        except SourceError:
+            return Document(policy.id, policy.title, "", complete=False)
+
+    def _index_hits(self, question, keyword_ids, operation, gap):
+        if not getattr(self.index, "enabled", False):
+            return []
+        try:
+            return self.index.search(
+                question,
+                keyword_ids=keyword_ids,
+                live_only=operation == "answer" and not gap,
+            )
+        except Exception:
+            logger.exception("Policy index search failed; using keyword mode")
+            self.index.degraded = True
+            return []
 
     def _evaluate(self, question, history, force_gap=False):
         self.on_event("Current Date · Europe/London")
@@ -144,15 +179,29 @@ class Agent:
         )
         selection.policy_ids = selected
         ids = selected
-        limited = len(ids) > MAX_POLICY_READS
-        ids = ids[:MAX_POLICY_READS]
-        docs = []
-        for pid in ids:
-            self.on_event(f"Read Policy · {by_id[pid].title}")
-            try:
-                docs.append(self.sources.read(by_id[pid]))
-            except SourceError:
-                docs.append(Document(pid, by_id[pid].title, "", complete=False))
+        hits = self._index_hits(resolved_question, selected, selection.operation, gap)
+        docs = (
+            documents_from_hits(
+                hits,
+                by_id,
+                today,
+                withhold_non_live=selection.operation == "answer" and not gap,
+            )
+            if hits
+            else []
+        )
+        if docs:
+            # Chunks stand in for whole documents, so more than 15 policies can be used.
+            self.on_event("Search Policy Index")
+            covered = {document.id for document in docs}
+            for pid in [policy_id for policy_id in selected if policy_id not in covered][:3]:
+                docs.append(self._read_one(by_id[pid]))
+            ids = [document.id for document in docs]
+            limited = False
+        else:
+            limited = len(ids) > MAX_POLICY_READS
+            ids = ids[:MAX_POLICY_READS]
+            docs = [self._read_one(by_id[pid]) for pid in ids]
         exhaustive = set(ids) == set(by_id) and all(d.complete for d in docs)
         response_docs = docs
         if selection.operation == "answer" and not gap:
@@ -204,6 +253,11 @@ class Agent:
             assessment.answer += (
                 "\n\nThis review was limited to 15 policies. "
                 "Please narrow the question to review the remaining policies."
+            )
+        if any(getattr(document, "indexed", False) for document in docs):
+            assessment.answer += (
+                "\n\nIndexed sections were used from the policy text search. "
+                "This is not a full read of every matching page."
             )
         return today, profile, inventory, docs, selection, assessment
 

@@ -160,6 +160,8 @@ the truth of every sentence or every clinical interpretation.
 The shared PIN gives every admitted user the same access, including the ability to
 authorise a placeholder. It is not individual authentication or role-based approval.
 Five failed attempts trigger a one-minute server-process cooldown across sessions.
+Re-indexing is separate: it needs `ADMIN_PIN` and does not accept the access PIN.
+Individual login, such as Streamlit OIDC, is not built.
 Sessions expire after 30 minutes without interaction; a logout or new chat clears
 conversation state. PIN access expires on logout; chats are not stored in a database.
 The original playbook is retained in `docs/original-playbook.md`; approved amendments
@@ -182,6 +184,70 @@ and the sections that match the question. The answer says which policy was focus
 omitted sections are not treated as missing coverage. If no section matches, the full text
 is still sent. The provider's own context limit may be smaller. Large collections can
 therefore exceed the initial gap-assessment capacity; no vector search index is included.
+
+## How the policy index works
+
+Nathan can search the words inside policies, not only their titles. This is off until Supabase is configured. With nothing set, the sidebar says **Search: keyword mode** and answers work as they do today.
+
+### Chunking
+
+Each policy is split on Markdown headings, so a chunk is one section and is stored with the policy title and that heading. A section under about 40 words is merged into its neighbour. A section over about 500 words is cut into pieces of about 400 words with a 40-word overlap, and each piece keeps the same heading and a chunk number so the next piece can be shown with it. The text sent to the embedding model is the title, the heading, then the words.
+
+### Sync
+
+A background task, about every 10 minutes, compares each Notion page's `last_edited_time` with the index and refreshes at most two changed pages so a chat message does not wait. Unchanged words are recognised by a content hash and are not embedded again. Changing the embedding model name or size marks every row stale. Pages that disappear from Notion, or are archived, are removed. Only one sync runs at a time: a lock row in Postgres, plus an advisory lock when the connection stays open. The first full build is the command in the setup list, or the admin **Re-index policies** button. The button is hidden unless `ADMIN_PIN` is set, and it does not accept the normal access PIN.
+
+### Retrieval
+
+A question is matched three ways, then combined with reciprocal rank fusion (no hand-tuned mix of scores):
+
+1. pgvector similarity
+2. Postgres full-text search
+3. the existing title and tag match
+
+Ordinary answers use Live chunks only. If a non-live policy is still cited, the source line says **Not Live** and the procedure text is withheld. The answer can use sections from more than 15 policies because it receives chunks, not whole documents. Citations still name the policy and the section heading. If Supabase is unset, or a search fails, Nathan logs that and stays in keyword mode.
+
+## Switch on the policy index
+
+Do these steps in order. Until the last ones are done, Nathan stays in keyword mode and does not error.
+
+1. In Supabase, create a project. Choose the **London** region (or another UK/EU region) so the policy text stays in the UK.
+2. Open the project. In the left sidebar open **Database**, then **Extensions**. Search for **vector** and enable it. If you prefer, the migration below also runs `create extension if not exists vector`.
+3. Open **SQL Editor**, then **New query**.
+4. On your computer, open the file `supabase/migrations/001_policy_chunks.sql` in this project. Select the whole file and copy it.
+5. Paste it into the SQL editor and click **Run**. You should see success, and a table named `policy_chunks`.
+6. Open **Project Settings** (the gear), then **API** (or **Data API**).
+7. Copy the **Project URL**. It looks like `https://abcdef.supabase.co`.
+8. On the same screen, under **Project API keys**, reveal and copy the **service_role** secret. Do not copy the **anon** or **publishable** key. The service_role key bypasses row level security and must only live in Streamlit secrets, never in the chat page or in git.
+9. In Streamlit Community Cloud, open the app, then **Settings**, then **Secrets**. Add these lines under the three secrets you already have. Keep the quotes.
+
+```toml
+SUPABASE_URL = "https://abcdef.supabase.co"
+SUPABASE_SERVICE_ROLE_KEY = "paste-the-service-role-secret"
+FREELLMAPI_EMBEDDING_MODEL = "text-embedding-3-small"
+ADMIN_PIN = "choose-a-long-admin-pin"
+```
+
+`FREELLMAPI_EMBEDDING_MODEL` is optional. Leave it out to use `text-embedding-3-small`, which is 1536 numbers per chunk and matches the migration. The embedding call uses the same `FREELLMAPI_SPI_KEY` and base URL as chat. If that endpoint cannot embed, the log says the embedding request failed and does not print the key. Chunks are not stored until an embedding succeeds, and answers keep using the old title search for that question.
+
+10. Restart the Streamlit app so it reads the new secrets. If the two Supabase secrets were read, the sidebar says **Search: policy index**. If they were not, it says **Search: keyword mode**. A failed search switches the label back to keyword mode.
+11. Build the first full index from your computer, in the project folder, with the same values in the environment (do not put them in a file that git tracks):
+
+```bash
+export NOTION_TOKEN="your-notion-token"
+export FREELLMAPI_SPI_KEY="your-api-key"
+export ACCESS_PIN="your-pin"
+export SUPABASE_URL="https://abcdef.supabase.co"
+export SUPABASE_SERVICE_ROLE_KEY="paste-the-service-role-secret"
+python -m nathan.index_cli
+```
+
+Wait until it prints `Index update finished`. That command can also be run on a schedule later.
+12. Confirm it worked: in Supabase open **Table Editor**, then `policy_chunks`, and check there are rows. In the app sidebar, ask a question whose answer is inside a policy rather than in its title. The tool list should include **Search Policy Index**, the source line should say **Indexed sections**, and the sidebar should say **Search: policy index**. If it still says keyword mode, the secrets are missing or the embedding call failed; check the Streamlit logs.
+
+To compare retrieval before and after, run `python -m nathan.retrieval_eval`. The report uses a draft question set labelled as such in `evals/draft_set.py`. Replace it by adding `evals/staff_questions.json`: a list of objects with `question`, `policy_id`, `section`, and `title`. No reranker is included.
+
+A nightly GitHub Action (`nightly index smoke`) calls Notion and Supabase only when those three secrets are stored in GitHub Actions. If they are absent, it prints SKIP and passes. It prints counts, not policy text.
 
 ## Verify
 

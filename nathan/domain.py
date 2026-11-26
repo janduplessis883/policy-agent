@@ -40,6 +40,7 @@ class Document:
     text: str
     complete: bool = True
     public_url: str | None = None
+    indexed: bool = False
 
 
 @dataclass

@@ -14,6 +14,7 @@ from nathan.config import Settings
 from nathan.domain import SourceError, UncertainWrite
 from nathan.model import PolicyModel
 from nathan.notion import NotionClient
+from nathan.policy_index import build_index
 from nathan.sources import Sources
 from nathan.tools.log_answer import log_answer
 
@@ -78,6 +79,30 @@ if not st.session_state.get("authenticated"):
         st.error("Access denied. Check the PIN. After repeated attempts, wait one minute.")
     st.stop()
 
+
+def _pins_match(supplied: str, expected: str) -> bool:
+    import hmac
+
+    if not supplied or not expected:
+        return False
+    left, right = supplied.encode(), expected.encode()
+    if len(left) != len(right):
+        return False
+    return hmac.compare_digest(left, right)
+
+
+@st.cache_resource
+def shared_services():
+    # One Notion client, one model client and one index for this process.
+    # They are not closed per message; Streamlit keeps them for the worker.
+    notion = NotionClient(settings.notion_token)
+    model = PolicyModel(settings)
+    index = build_index(settings, notion)
+    if index.enabled:
+        index.start_background()
+    return notion, model, index
+
+
 st.session_state.last_active = time.monotonic()
 st.session_state.setdefault("messages", [])
 st.session_state.setdefault("pending", None)
@@ -95,28 +120,45 @@ with st.sidebar:
         clear_session()
         st.rerun()
     st.caption(
+        "Do not enter patient-identifiable information. "
         "Access expires after 30 minutes without activity. "
-        "Please keep patient-identifiable information out of this chat. "
         "Answers name the policy and section. If none is cited, the policies do not cover it."
     )
+    _notion, _model, policy_index = shared_services()
+    if policy_index.enabled and not policy_index.degraded:
+        st.caption("Search: policy index")
+    else:
+        st.caption("Search: keyword mode")
+    if policy_index.enabled and settings.admin_pin:
+        with st.form("reindex"):
+            st.caption("Re-index is limited to the admin PIN. It is not the access PIN.")
+            st.text_input("Admin PIN", type="password", key="admin_pin_entry")
+            if st.form_submit_button("Re-index policies"):
+                entered = st.session_state.get("admin_pin_entry", "")
+                if _pins_match(entered, settings.admin_pin):
+                    with st.spinner("Re-indexing changed policies…"):
+                        try:
+                            summary = policy_index.sync_incremental(max_pages=None)
+                        except Exception:
+                            logger.exception("Manual policy re-index failed")
+                            st.error("Re-index did not finish. The details are in the server log.")
+                        else:
+                            st.success(summary)
+                else:
+                    st.error("Admin PIN was not accepted.")
 
 
 @contextmanager
 def agent_session(on_event=None, on_text=None):
-    # Clients and their credentials stay on the server.
-    notion = NotionClient(settings.notion_token)
-    model = PolicyModel(settings)
-    try:
-        yield Agent(
-            Sources(notion),
-            model,
-            on_event=on_event,
-            on_text=on_text,
-            log_answer=partial(log_answer, notion),
-        )
-    finally:
-        notion.close()
-        model.close()
+    notion, model, index = shared_services()
+    yield Agent(
+        Sources(notion),
+        model,
+        on_event=on_event,
+        on_text=on_text,
+        log_answer=partial(log_answer, notion),
+        index=index,
+    )
 
 
 for message in st.session_state.messages:
