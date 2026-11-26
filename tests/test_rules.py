@@ -59,6 +59,26 @@ def test_optional_endpoint_settings_keep_defaults(monkeypatch):
     assert explicit.model == "named-model"
 
 
+def test_supabase_is_optional_and_https_only(monkeypatch):
+    monkeypatch.delenv("SUPABASE_URL", raising=False)
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    plain = Settings.from_secrets(_required_secrets())
+    assert plain.index_enabled is False
+    enabled = Settings.from_secrets(
+        {
+            **_required_secrets(),
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "service-role",
+            "ADMIN_PIN": "admin-pin",
+        }
+    )
+    assert enabled.index_enabled is True
+    assert enabled.admin_pin == "admin-pin"
+    assert enabled.embedding_model == "text-embedding-3-small"
+    with pytest.raises(SourceError, match="SUPABASE_URL"):
+        Settings.from_secrets({**_required_secrets(), "SUPABASE_URL": "http://example.supabase.co"})
+
+
 def test_insecure_model_url_is_rejected():
     with pytest.raises(SourceError, match="https"):
         Settings.from_secrets(

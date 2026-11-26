@@ -25,6 +25,14 @@ class Settings:
     access_pin: str
     base_url: str = BASE_URL
     model: str = "auto"
+    supabase_url: str = ""
+    supabase_key: str = ""
+    embedding_model: str = "text-embedding-3-small"
+    admin_pin: str = ""
+
+    @property
+    def index_enabled(self) -> bool:
+        return bool(self.supabase_url and self.supabase_key)
 
     @classmethod
     def from_secrets(cls, secrets: Mapping):
@@ -41,10 +49,23 @@ class Settings:
                 "FREELLMAPI_BASE_URL must be an https URL with no spaces. "
                 "Remove it to use the default endpoint."
             )
+        supabase_url = _optional_setting(secrets, "SUPABASE_URL")
+        supabase_key = _optional_setting(secrets, "SUPABASE_SERVICE_ROLE_KEY")
+        if supabase_url and (
+            not supabase_url.startswith("https://") or any(char in supabase_url for char in " \n\r")
+        ):
+            raise SourceError(
+                "SUPABASE_URL must be an https URL with no spaces. "
+                "Remove SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY to stay in keyword mode."
+            )
         return cls(
             secrets["FREELLMAPI_SPI_KEY"].strip(),
             secrets["NOTION_TOKEN"].strip(),
             secrets["ACCESS_PIN"].strip(),
             base_url,
             model,
+            supabase_url,
+            supabase_key,
+            _optional_setting(secrets, "FREELLMAPI_EMBEDDING_MODEL") or "text-embedding-3-small",
+            _optional_setting(secrets, "ADMIN_PIN"),
         )

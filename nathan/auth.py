@@ -4,7 +4,10 @@ from threading import Lock
 
 
 class PinGuard:
-    """Process-wide throttle: persists across browser sessions in one server worker."""
+    """Process-wide rate limit: five failures lock every session on this worker for one minute.
+
+    This is not per-person login. Individual accounts (for example Streamlit OIDC) are not used.
+    """
 
     def __init__(self, max_attempts=5, cooldown=60):
         self.max_attempts = max_attempts
