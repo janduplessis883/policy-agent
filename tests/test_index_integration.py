@@ -61,6 +61,26 @@ def test_full_text_vector_and_row_level_security(database):
         assert [row[0] for row in cursor.fetchall()] == ["live"]
         cursor.execute(
             """
+            insert into policy_chunks (
+                page_id, title, section_heading, chunk_index, chunk_text, content_hash,
+                last_edited_time, is_live, embedding, embedding_model, embedding_dimensions
+            ) values
+            ('other', 'Other model', 'Fridge temperatures', 0, 'record the fridge minimum',
+             'hash-other', '2026-01-01', true, %s, 'other/model', 1536)
+            """,
+            (_vector(0),),
+        )
+        cursor.execute(
+            """
+            select page_id from search_policy_chunks_vector(
+                %s::vector, 10, true, 'text-embedding-3-small'
+            )
+            """,
+            (_vector(0),),
+        )
+        assert [row[0] for row in cursor.fetchall()] == ["live"]
+        cursor.execute(
+            """
             select chunk_index from neighbour_policy_chunks('live', 0)
             """
         )
@@ -80,7 +100,7 @@ def test_full_text_vector_and_row_level_security(database):
         assert cursor.fetchone()[0] == 0
         cursor.execute("reset role")
         cursor.execute("select count(*) from policy_chunks")
-        assert cursor.fetchone()[0] == 2
+        assert cursor.fetchone()[0] == 3
         cursor.execute("drop owned by nathan_reader")
         cursor.execute("drop role nathan_reader")
     database.commit()

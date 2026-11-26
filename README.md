@@ -168,7 +168,8 @@ The original playbook is retained in `docs/original-playbook.md`; approved amend
 are in the design document and system prompt.
 
 Questions, recent chat context, the Surgery Profile and relevant policy text are sent
-to the configured model endpoint. Nathan does not deliberately log their contents.
+to the configured chat endpoint (FreeLLMAPI). When the policy index embeds a chunk, that
+chunk text is also sent to OpenRouter. Nathan does not deliberately log their contents.
 Avoid patient-identifiable information. There is no external regulatory verification
 tool: legal/CQC/NHS compliance must not be asserted from local policy evidence alone.
 
@@ -195,7 +196,9 @@ Each policy is split on Markdown headings, so a chunk is one section and is stor
 
 ### Sync
 
-A background task, about every 10 minutes, compares each Notion page's `last_edited_time` with the index and refreshes at most two changed pages so a chat message does not wait. Unchanged words are recognised by a content hash and are not embedded again. Changing the embedding model name or size marks every row stale. Pages that disappear from Notion, or are archived, are removed. Only one sync runs at a time: a lock row in Postgres, plus an advisory lock when the connection stays open. The first full build is the command in the setup list, or the admin **Re-index policies** button. The button is hidden unless `ADMIN_PIN` is set, and it does not accept the normal access PIN.
+A background task, about every 10 minutes, compares each Notion page's `last_edited_time` with the index and refreshes at most two changed pages so a chat message does not wait. Unchanged words are recognised by a content hash and are not embedded again. Changing the embedding model name or size marks every row stale, and the next Re-index embeds those rows again. Vector search only compares a question with chunks stored for that same model. Pages that disappear from Notion, or are archived, are removed. Only one sync runs at a time: a lock row in Postgres, plus an advisory lock when the connection stays open. The first full build is the command in the setup list, or the admin **Re-index policies** button. The button is hidden unless `ADMIN_PIN` is set, and it does not accept the normal access PIN.
+
+Chat answers stay on FreeLLMAPI. Embeddings are a separate call to OpenRouter (`https://openrouter.ai/api/v1/embeddings`) using `OPENROUTER_API_KEY`. The default model is `openai/text-embedding-3-small`, which returns 1536 numbers and matches the existing vector column. If `OPENROUTER_API_KEY` is missing, Nathan logs that vector search is off and keeps full-text search. The log never prints the key.
 
 ### Retrieval
 
@@ -215,7 +218,7 @@ Do these steps in order. Until the last ones are done, Nathan stays in keyword m
 2. Open the project. In the left sidebar open **Database**, then **Extensions**. Search for **vector** and enable it. If you prefer, the migration below also runs `create extension if not exists vector`.
 3. Open **SQL Editor**, then **New query**.
 4. On your computer, open the file `supabase/migrations/001_policy_chunks.sql` in this project. Select the whole file and copy it.
-5. Paste it into the SQL editor and click **Run**. You should see success, and a table named `policy_chunks`. If you already ran this file before the 403 fix, also paste and run `supabase/migrations/002_grant_index_functions.sql` the same way. That second file only grants the secret key permission to call the index functions. It does not delete any rows. Then reboot the Streamlit app.
+5. Paste it into the SQL editor and click **Run**. You should see success, and a table named `policy_chunks`. If you already ran this file before the 403 fix, also paste and run `supabase/migrations/002_grant_index_functions.sql` the same way. That second file only grants the secret key permission to call the index functions. It does not delete any rows. If the index is already built, also paste and run `supabase/migrations/003_vector_search_model.sql`. That file makes vector search ignore chunks embedded by a different model. It does not delete any rows and it does not change the vector size. Then reboot the Streamlit app.
 6. Open **Project Settings** (the gear), then **API** (or **Data API**).
 7. Copy the **Project URL**. It looks like `https://abcdef.supabase.co`.
 8. On the same screen, under **Project API keys**, copy the **secret** key. It starts with `sb_secret_`. If your project still shows the legacy **service_role** key, that one also works: it is a long value starting with `eyJ`. Do not copy a key starting with `sb_publishable_` and do not copy the **anon** key. The secret key must only live in Streamlit secrets, never in the chat page and never in git.
@@ -224,11 +227,12 @@ Do these steps in order. Until the last ones are done, Nathan stays in keyword m
 ```toml
 SUPABASE_URL = "https://abcdef.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY = "paste-the-service-role-secret"
-FREELLMAPI_EMBEDDING_MODEL = "text-embedding-3-small"
+OPENROUTER_API_KEY = "paste-the-openrouter-key"
+OPENROUTER_EMBEDDING_MODEL = "openai/text-embedding-3-small"
 ADMIN_PIN = "choose-a-long-admin-pin"
 ```
 
-`FREELLMAPI_EMBEDDING_MODEL` is optional. Leave it out to use `text-embedding-3-small`, which is 1536 numbers per chunk and matches the migration. The embedding call uses the same `FREELLMAPI_SPI_KEY` and base URL as chat. If that endpoint cannot embed, the log says the embedding request failed and does not print the key. Chunks are not stored until an embedding succeeds, and answers keep using the old title search for that question.
+`OPENROUTER_EMBEDDING_MODEL` is optional. Leave it out to use `openai/text-embedding-3-small`, which is 1536 numbers per chunk and matches the migration. Chat keeps using `FREELLMAPI_SPI_KEY`. Embeddings use `OPENROUTER_API_KEY` only. `FREELLMAPI_EMBEDDING_MODEL` is no longer read. If `OPENROUTER_API_KEY` is missing, the log says vector search is off, full-text search still runs, and the Re-index sentence says the text was stored without embeddings. The key is not written to the log.
 
 10. Restart the Streamlit app so it reads the new secrets. If the two Supabase secrets were read, the sidebar says **Search: policy index**. If they were not, it says **Search: keyword mode**. A failed search switches the label back to keyword mode.
 11. Build the first full index from your computer, in the project folder, with the same values in the environment (do not put them in a file that git tracks):
@@ -239,6 +243,7 @@ export FREELLMAPI_SPI_KEY="your-api-key"
 export ACCESS_PIN="your-pin"
 export SUPABASE_URL="https://abcdef.supabase.co"
 export SUPABASE_SERVICE_ROLE_KEY="paste-the-service-role-secret"
+export OPENROUTER_API_KEY="paste-the-openrouter-key"
 python -m nathan.index_cli
 ```
 

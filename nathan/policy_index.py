@@ -7,9 +7,9 @@ import uuid
 from dataclasses import dataclass
 
 from nathan.chunks import chunk_policy
+from nathan.embeddings import Embedder
 from nathan.fusion import reciprocal_rank_fusion
 from nathan.index_sync import (
-    EMBEDDING_DIMENSIONS,
     StoredChunk,
     format_sync_report,
     plan_sync,
@@ -49,49 +49,6 @@ class NullIndex:
         return None
 
 
-class Embedder:
-    """Embeddings from the same OpenAI-compatible endpoint as the chat model."""
-
-    def __init__(self, settings):
-        from openai import OpenAI
-
-        self.model = settings.embedding_model
-        self.dimensions = EMBEDDING_DIMENSIONS
-        self.last_error = ""
-        self._client = OpenAI(
-            api_key=settings.api_key,
-            base_url=settings.base_url,
-            timeout=60,
-            max_retries=0,
-        )
-
-    def embed(self, texts: list[str]) -> list[list[float]] | None:
-        self.last_error = ""
-        if not texts:
-            return []
-        try:
-            response = self._client.embeddings.create(model=self.model, input=texts)
-        except Exception as exc:  # noqa: BLE001 -- do not log the request; it can carry the key
-            self.last_error = type(exc).__name__
-            logger.warning("Embedding request failed (%s)", self.last_error)
-            return None
-        ordered = sorted(response.data, key=lambda item: item.index)
-        vectors = [list(item.embedding) for item in ordered]
-        if any(len(vector) != self.dimensions for vector in vectors):
-            self.last_error = f"{self.model} returned a dimension other than {self.dimensions}"
-            logger.warning(
-                "Embedding model %s did not return %s dimensions", self.model, self.dimensions
-            )
-            return None
-        return vectors
-
-    def embed_one(self, text: str) -> list[float] | None:
-        vectors = self.embed([text])
-        if not vectors:
-            return None
-        return vectors[0]
-
-
 class PolicyIndex:
     def __init__(self, settings, notion):
         self.enabled = True
@@ -107,7 +64,9 @@ class PolicyIndex:
         # Live answers do not retrieve non-live chunks. Gap and review passes ask for both.
         embedding = self._embedder.embed_one(question)
         vector_rows = (
-            self._store.search_vector(embedding, 30, live_only) if embedding is not None else []
+            self._store.search_vector(embedding, 30, live_only, self._embedder.model)
+            if embedding is not None
+            else []
         )
         fts_rows = self._store.search_fts(question, 30, live_only)
         if not isinstance(vector_rows, list):

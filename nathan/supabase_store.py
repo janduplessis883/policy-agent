@@ -146,13 +146,17 @@ class SupabaseStore:
         )
 
     def search_vector(
-        self, embedding: list[float], match_count: int, live_only: bool
+        self, embedding: list[float], match_count: int, live_only: bool, embedding_model: str = ""
     ) -> list[dict]:
         literal = "[" + ",".join(f"{value:.6f}" for value in embedding) + "]"
-        return self._rpc(
-            "search_policy_chunks_vector",
-            {"query_embedding": literal, "match_count": match_count, "live_only": live_only},
-        )
+        payload = {
+            "query_embedding": literal,
+            "match_count": match_count,
+            "live_only": live_only,
+        }
+        if embedding_model:
+            payload["p_embedding_model"] = embedding_model
+        return self._rpc("search_policy_chunks_vector", payload)
 
     def neighbours(self, page_id: str, chunk_index: int) -> list[dict]:
         return self._rpc(

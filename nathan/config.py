@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from nathan.domain import SourceError
+from nathan.embeddings import DEFAULT_EMBEDDING_MODEL
 
 DATA_SOURCE_ID = "261fdfd6-8a97-81b1-9e23-000bf4245172"
 DATABASE_ID = "261fdfd6-8a97-8060-af8a-f3f29754e96e"
@@ -27,8 +28,9 @@ class Settings:
     model: str = "auto"
     supabase_url: str = ""
     supabase_key: str = ""
-    embedding_model: str = "text-embedding-3-small"
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
     admin_pin: str = ""
+    openrouter_api_key: str = ""
 
     @property
     def index_enabled(self) -> bool:
@@ -66,6 +68,7 @@ class Settings:
             model,
             supabase_url,
             supabase_key,
-            _optional_setting(secrets, "FREELLMAPI_EMBEDDING_MODEL") or "text-embedding-3-small",
+            _optional_setting(secrets, "OPENROUTER_EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODEL,
             _optional_setting(secrets, "ADMIN_PIN"),
+            _optional_setting(secrets, "OPENROUTER_API_KEY"),
         )

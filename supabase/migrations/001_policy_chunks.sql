@@ -167,10 +167,15 @@ as $$
     limit match_count;
 $$;
 
+-- Drop the previous signature so a re-run can add p_embedding_model.
+drop function if exists search_policy_chunks_vector(vector, integer, boolean);
+drop function if exists search_policy_chunks_vector(vector, integer, boolean, text);
+
 create or replace function search_policy_chunks_vector(
     query_embedding vector(1536),
     match_count integer,
-    live_only boolean
+    live_only boolean,
+    p_embedding_model text default null
 )
 returns table (
     page_id text,
@@ -186,6 +191,7 @@ as $$
     select page_id, title, section_heading, chunk_text, chunk_index, is_live
     from policy_chunks
     where embedding is not null
+      and (p_embedding_model is null or embedding_model = p_embedding_model)
       and (not live_only or is_live)
     order by embedding <=> query_embedding
     limit match_count;
