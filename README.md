@@ -281,8 +281,10 @@ Answers stream from the model endpoint using Chat Completions SSE. The interface
 extracts only the answer text from the incremental JSON envelope; raw JSON, source
 records and internal reasoning are not displayed. Final source validation runs before
 a response is saved or a placeholder proposal becomes available. Failed validation
-clears the temporary answer and shows the failure. A live status indicator lists the
-actual tools called, and each saved answer retains a collapsible Tool use status panel.
+clears the temporary answer and shows the failure. A live status indicator lists each
+step as it happens, with the time so far and the current step in the label. After the
+answer, the same lines stay in a collapsible Tool use status panel. The lines name
+titles, counts and scores. They do not include policy text or secrets.
 
 Policy selection has a dedicated task prompt rather than the full policy-answering
 playbook. Short source aliases map back to retrieved Notion page IDs. The model receives

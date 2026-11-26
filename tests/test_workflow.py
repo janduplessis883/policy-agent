@@ -96,11 +96,12 @@ def test_logs_final_answer_without_losing_it_if_notion_fails(save_fails):
     assert "T" in props["Date"]["date"]["start"]
     assert props["Model"]["rich_text"][0]["text"]["content"] == "selection-model, answer-model"
     assert props["Tokens used"]["number"] == 500
-    assert events[-1] == (
+    logged = " ".join(event[1] if isinstance(event, tuple) else str(event) for event in events)
+    assert (
         "Log Answer · Notion did not confirm the save"
         if save_fails
         else "Log Answer · saved to Notion"
-    )
+    ) in logged
 
 
 def test_unknown_policy_reference_is_rejected():
@@ -241,12 +242,15 @@ def test_staff_answer_can_cite_retrieved_surgery_profile():
 def test_reports_actual_tool_order_to_ui():
     events = []
     Agent(Sources(), Model(), on_event=events.append).ask("Question", [])
-    assert events == [
-        "Current Date · Europe/London",
-        "Get Surgery Profile",
-        "List Policies",
-        "Read Policy · Safety",
-    ]
+    lines = [event[1] for event in events]
+    labels = [event[0] for event in events]
+    assert labels[0] == "Routing"
+    assert "normal retrieval" in lines[0]
+    assert any("Surgery profile" in line for line in lines)
+    assert any("Policy inventory" in line for line in lines)
+    assert any("Read Notion: Safety" in line for line in lines)
+    assert any("Summary:" in line for line in lines)
+    assert labels.index("Reading Notion") < labels.index("Finished")
 
 
 @pytest.mark.parametrize("operation", ["answer", "review", "gap", "placeholder"])
@@ -592,8 +596,9 @@ def test_unexpected_log_failure_keeps_the_answer():
         "What should I do?", []
     )
     assert "Safety" in result.text
-    assert events[-1] == "Log Answer · Notion did not confirm the save"
-    assert all("sk-secret" not in event for event in events)
+    lines = [event[1] if isinstance(event, tuple) else str(event) for event in events]
+    assert any("Log Answer · Notion did not confirm the save" in line for line in lines)
+    assert all("sk-secret" not in line for line in lines)
 
 
 def test_overdue_question_uses_the_register_and_does_not_call_the_model():
@@ -615,8 +620,10 @@ def test_overdue_question_uses_the_register_and_does_not_call_the_model():
         "Which policies are overdue?", []
     )
     assert sources.calls == ["inventory"]
-    assert "Read" not in " ".join(events)
-    assert "List Overdue Policies" in " ".join(events)
+    lines = [event[1] for event in events]
+    assert "Read Notion" not in " ".join(lines)
+    assert "List Overdue Policies" in " ".join(lines)
+    assert any("overdue list" in line for line in lines)
     assert "too large" not in result.text
     assert "Cold chain" in result.text
     assert "review date 2020-01-01" in result.text

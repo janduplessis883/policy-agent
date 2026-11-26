@@ -1,4 +1,5 @@
 import json
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal
@@ -10,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nathan.domain import SourceError
 from nathan.passages import pack_text, section_in_text, section_titles
 from nathan.policy_search import lexical_policy_ids
+from nathan.progress import emit
 from nathan.response import decode_response, partial_answer
 
 
@@ -160,6 +162,14 @@ class PolicyModel:
             },
             {"role": "user", "content": content},
         ]
+        stage = "Calling the model" if stream else "Selecting policies"
+        prompt_chars = len(messages[0]["content"]) + len(content)
+        started = time.perf_counter()
+        emit(
+            stage,
+            f"{stage}: chat model {self.model}, prompt about {prompt_chars:,} characters.",
+        )
+        first_token = False
         try:
             for attempt in range(3):
                 reported_model = None
@@ -182,6 +192,13 @@ class PolicyModel:
                                 continue
                             choice = chunk.choices[0]
                             raw += choice.delta.content or ""
+                            if raw and not first_token:
+                                first_token = True
+                                emit(
+                                    stage,
+                                    f"{stage}: first token in {time.perf_counter() - started:.2f}s, "
+                                    f"model {reported_model or self.model}.",
+                                )
                             if choice.finish_reason:
                                 finish = choice.finish_reason
                             if on_text:
@@ -208,6 +225,12 @@ class PolicyModel:
                     result = schema.model_validate(decode_response(raw)).model_dump()
                     result = validate(result) if validate else result
                     self.response_model = reported_model
+                    emit(
+                        stage,
+                        f"{stage}: finished in {time.perf_counter() - started:.2f}s, "
+                        f"model {reported_model or self.model}, "
+                        f"prompt about {prompt_chars:,} characters.",
+                    )
                     return result
                 except (ValidationError, ValueError) as exc:
                     if attempt == 2:
@@ -445,7 +468,14 @@ class PolicyModel:
                 else "relevant_policies_read"
             ),
         }
+        original_len = _prompt_length(payload)
         payload = fit_response_payload(payload, shown, alias_to_id)
+        if _prompt_length(payload) < original_len:
+            emit(
+                "Size budget",
+                "Prompt was shortened to stay within the size budget. "
+                "Some later sections were omitted.",
+            )
         return self._json(
             "The mandatory date/profile/inventory/read sequence is COMPLETE. Answer only from "
             "the supplied evidence. Emit the answer field FIRST so it can be streamed. "

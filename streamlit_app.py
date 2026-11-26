@@ -35,6 +35,13 @@ SUGGESTIONS = (
 )
 
 
+def _status_event(event):
+    if isinstance(event, tuple) and len(event) == 2:
+        return str(event[0]), str(event[1])
+    text = str(event)
+    return text, text
+
+
 def tool_caption(model, source_note):
     if source_note:
         return source_note
@@ -200,8 +207,9 @@ if pending and not st.session_state.uncertain_write:
                 with st.status("Creating placeholder…", expanded=True) as status:
 
                     def report_creation_tool(event):
-                        status.update(label=event)
-                        status.write(event)
+                        label_text, line = _status_event(event)
+                        status.update(label=label_text)
+                        status.write(line)
 
                     with agent_session(on_event=report_creation_tool) as agent:
                         result = agent.create(
@@ -244,12 +252,14 @@ if question:
         st.markdown(question)
     tools = []
     with st.chat_message("assistant"):
-        status = st.status("Tool use", expanded=True)
+        status = st.status("Starting", expanded=True)
         output = st.empty()
 
         def report_tool(event):
-            tools.append(event)
-            status.write(event)
+            label_text, line = _status_event(event)
+            tools.append(line)
+            status.update(label=label_text)
+            status.write(line)
 
         def show_answer(text):
             if text:
@@ -262,7 +272,7 @@ if question:
                 result = agent.ask(question, history)
             output.markdown(result.text)
             status.caption(tool_caption(result.model, result.source_note))
-            status.update(state="complete", expanded=False)
+            status.update(label="Answered", state="complete", expanded=False)
             st.session_state.messages.append(
                 {
                     "role": "assistant",
@@ -281,14 +291,14 @@ if question:
                 }
         except SourceError as exc:
             output.empty()
-            status.update(label="Request could not be verified", state="error", expanded=False)
+            status.update(label="Request could not be verified", state="error", expanded=True)
             st.session_state.messages.append(
                 {"role": "assistant", "content": str(exc), "tools": tools}
             )
         except Exception:
             logger.exception("Nathan request failed")
             output.empty()
-            status.update(label="Request failed", state="error", expanded=False)
+            status.update(label="Request failed", state="error", expanded=True)
             st.session_state.messages.append(
                 {
                     "role": "assistant",

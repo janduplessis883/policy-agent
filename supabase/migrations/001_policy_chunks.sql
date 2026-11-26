@@ -183,12 +183,14 @@ returns table (
     section_heading text,
     chunk_text text,
     chunk_index integer,
-    is_live boolean
+    is_live boolean,
+    similarity double precision
 )
 language sql
 stable
 as $$
-    select page_id, title, section_heading, chunk_text, chunk_index, is_live
+    select page_id, title, section_heading, chunk_text, chunk_index, is_live,
+           1 - (embedding <=> query_embedding) as similarity
     from policy_chunks
     where embedding is not null
       and (p_embedding_model is null or embedding_model = p_embedding_model)

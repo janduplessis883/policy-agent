@@ -8,13 +8,14 @@ from dataclasses import dataclass
 
 from nathan.chunks import chunk_policy
 from nathan.embeddings import Embedder
-from nathan.fusion import reciprocal_rank_fusion
+from nathan.fusion import fusion_scores
 from nathan.index_sync import (
     StoredChunk,
     format_sync_report,
     plan_sync,
     same_content,
 )
+from nathan.progress import brief, emit
 from nathan.supabase_store import IndexUnavailable, SupabaseStore
 
 logger = logging.getLogger(__name__)
@@ -62,29 +63,78 @@ class PolicyIndex:
 
     def search(self, question, keyword_ids=(), live_only=True) -> list[ChunkHit]:
         # Live answers do not retrieve non-live chunks. Gap and review passes ask for both.
+        started = time.perf_counter()
         embedding = self._embedder.embed_one(question)
+        embed_s = time.perf_counter() - started
+        if embedding is None:
+            reason = brief(getattr(self._embedder, "last_error", "") or "no vector returned", 120)
+            emit(
+                "Embedding query",
+                f"Query embedding skipped or failed: OpenRouter {self._embedder.model}, "
+                f"{embed_s:.2f}s. {reason}",
+            )
+        else:
+            emit(
+                "Embedding query",
+                f"Query embedding: OpenRouter {self._embedder.model}, "
+                f"{len(embedding)} dimensions, {embed_s:.2f}s.",
+            )
+        started = time.perf_counter()
         vector_rows = (
             self._store.search_vector(embedding, 30, live_only, self._embedder.model)
             if embedding is not None
             else []
         )
-        fts_rows = self._store.search_fts(question, 30, live_only)
+        vector_s = time.perf_counter() - started
         if not isinstance(vector_rows, list):
             vector_rows = []
+        similarity = _top_similarity(vector_rows)
+        similarity_text = (
+            f"top similarity {similarity:.3f}"
+            if similarity is not None
+            else "similarity was not returned"
+        )
+        scope = "Live chunks only" if live_only else "Live and non-live chunks"
+        emit(
+            "Searching index: vector",
+            f"Vector search: {len(vector_rows)} hits, {similarity_text}, {scope}, "
+            f"{vector_s:.2f}s. Top: {_titles(vector_rows)}.",
+        )
+        started = time.perf_counter()
+        fts_rows = self._store.search_fts(question, 30, live_only)
+        fts_s = time.perf_counter() - started
         if not isinstance(fts_rows, list):
             fts_rows = []
-        fused = reciprocal_rank_fusion(
-            [
-                _page_order(vector_rows),
-                _page_order(fts_rows),
-                [page_id for page_id in keyword_ids if page_id],
-            ]
+        emit(
+            "Searching index: full-text",
+            f"Full-text search: {len(fts_rows)} hits, {scope}, {fts_s:.2f}s. "
+            f"Top: {_titles(fts_rows)}.",
         )
-        if not fused:
+        keyword_ids = [page_id for page_id in keyword_ids if page_id]
+        ranked = fusion_scores([_page_order(vector_rows), _page_order(fts_rows), keyword_ids])
+        names = _title_by_id(vector_rows + fts_rows)
+        top = ", ".join(
+            f"{names.get(page_id, 'Matched policy')} {score:.3f}" for page_id, score in ranked[:5]
+        )
+        emit(
+            "Fusing results",
+            f"Fusion: {len(ranked)} policies. Title and tag list: {len(keyword_ids)}. "
+            f"Top: {top or 'none'}.",
+        )
+        if not ranked:
             return []
-        chosen = fused[:20]
+        chosen = [page_id for page_id, _score in ranked[:20]]
         hits = [_hit(row) for row in vector_rows + fts_rows if row.get("page_id") in set(chosen)]
+        before = {(hit.page_id, hit.chunk_index) for hit in hits}
         hits = _with_neighbours(self._store, hits)
+        added = [hit for hit in hits if (hit.page_id, hit.chunk_index) not in before]
+        added_titles = _unique([hit.title for hit in added if hit.title])
+        emit(
+            "Expanding neighbour chunks",
+            f"Neighbour chunks: added {len(added)}"
+            + (f" for {', '.join(added_titles[:5])}" if added_titles else "")
+            + ".",
+        )
         return _ordered(hits, chosen)
 
     def sync_incremental(self, max_pages=None) -> str:
@@ -239,6 +289,40 @@ def _group(rows: list[dict]) -> dict[str, list[StoredChunk]]:
     return grouped
 
 
+def _unique(items: list[str]) -> list[str]:
+    seen = []
+    for item in items:
+        if item and item not in seen:
+            seen.append(item)
+    return seen
+
+
+def _titles(rows: list[dict]) -> str:
+    names = _unique([brief(row.get("title") or "Untitled", 60) for row in rows])
+    return ", ".join(names[:5]) or "none"
+
+
+def _title_by_id(rows: list[dict]) -> dict[str, str]:
+    names = {}
+    for row in rows:
+        page_id = row.get("page_id")
+        title = row.get("title")
+        if page_id and title and page_id not in names:
+            names[page_id] = brief(title, 60)
+    return names
+
+
+def _top_similarity(rows: list[dict]):
+    values = []
+    for row in rows:
+        raw = row.get("similarity")
+        try:
+            values.append(float(raw))
+        except (TypeError, ValueError):
+            continue
+    return max(values) if values else None
+
+
 def _page_order(rows: list[dict]) -> list[str]:
     order = []
     for row in rows:
@@ -268,6 +352,10 @@ def _with_neighbours(store: SupabaseStore, hits: list[ChunkHit]) -> list[ChunkHi
             rows = store.neighbours(hit.page_id, hit.chunk_index)
         except IndexUnavailable:
             logger.warning("Neighbour lookup failed; using the matched chunks only")
+            emit(
+                "Expanding neighbour chunks",
+                "Neighbour lookup failed. Using the matched chunks only.",
+            )
             return hits
         for row in rows or []:
             key = (row.get("page_id"), int(row.get("chunk_index") or 0))
