@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from dataclasses import replace
 from datetime import datetime
 from threading import Lock
@@ -12,6 +13,7 @@ from nathan.model import Assessment, Selection
 from nathan.passages import section_in_text
 from nathan.policy_index import NullIndex, documents_from_hits
 from nathan.policy_search import lexical_policy_ids
+from nathan.progress import Progress, brief, emit, use_progress
 from nathan.register import is_register_question, policy_status, render_register
 from nathan.tools.create_placeholder import create_placeholder
 from nathan.tools.current_date import current_date
@@ -20,6 +22,33 @@ from nathan.tools.list_overdue_policies import is_overdue_question, list_overdue
 WRITE_LOCK = Lock()
 MAX_POLICY_READS = 15
 logger = logging.getLogger(__name__)
+
+
+def _safe_reason(exc) -> str:
+    text = " ".join(str(exc).split())
+    lowered = text.casefold()
+    if any(mark in lowered for mark in ("bearer", "sb_secret", "sb_publishable", "api_key", "eyj")):
+        return type(exc).__name__
+    return brief(f"{type(exc).__name__}: {text}", 140)
+
+
+def _cited(result) -> str:
+    text = result.text or ""
+    if "**Sources**" not in text:
+        return "Sources: none cited."
+    lines = []
+    for line in text.split("**Sources**", 1)[1].splitlines():
+        line = line.strip()
+        if not line.startswith("- "):
+            if lines:
+                break
+            continue
+        lines.append(brief(line[2:], 90))
+        if len(lines) == 6:
+            break
+    if not lines:
+        return "Sources: none cited."
+    return "Sources: " + "; ".join(lines) + "."
 
 
 def label(text):
@@ -152,15 +181,31 @@ class Agent:
         self.log_answer = log_answer
         self.index = index if index is not None else NullIndex()
 
+    def _event(self, label, detail):
+        emit(label, detail)
+
     def _read_one(self, policy):
-        self.on_event(f"Read Policy · {policy.title}")
+        started = time.perf_counter()
         try:
-            return self.sources.read(policy)
+            document = self.sources.read(policy)
         except SourceError:
-            return Document(policy.id, policy.title, "", complete=False)
+            document = Document(policy.id, policy.title, "", complete=False)
+        took = time.perf_counter() - started
+        kind = "incomplete" if not document.complete else "full text"
+        self._event(
+            "Reading Notion",
+            f"Read Notion: {brief(policy.title)}, live, {took:.2f}s, {kind}, "
+            f"{len(document.text):,} characters.",
+        )
+        return document
 
     def _index_hits(self, question, keyword_ids, operation, gap):
         if not getattr(self.index, "enabled", False):
+            self._event(
+                "Index search",
+                "Index search skipped: the policy index is not configured. "
+                "Falling back to title and tag matches and Notion reads.",
+            )
             return []
         try:
             return self.index.search(
@@ -168,18 +213,31 @@ class Agent:
                 keyword_ids=keyword_ids,
                 live_only=operation == "answer" and not gap,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Policy index search failed; using keyword mode")
             self.index.degraded = True
+            self._event(
+                "Index search",
+                f"Index search failed ({_safe_reason(exc)}). Falling back to Notion reads.",
+            )
             return []
 
     def _evaluate(self, question, history, force_gap=False):
-        self.on_event("Current Date · Europe/London")
         today = self.clock()
-        self.on_event("Get Surgery Profile")
+        self._event("Current date", f"Current date: Europe/London, {today.isoformat()}.")
+        started = time.perf_counter()
         profile = self.sources.profile()
-        self.on_event("List Policies")
+        self._event(
+            "Reading Notion",
+            f"Surgery profile: live Notion read, {time.perf_counter() - started:.2f}s, "
+            f"{brief(profile.title)}.",
+        )
+        started = time.perf_counter()
         inventory = self.sources.inventory()
+        self._event(
+            "Policy inventory",
+            f"Policy inventory: {len(inventory)} pages, {time.perf_counter() - started:.2f}s.",
+        )
         try:
             selection = Selection.model_validate(self.model.select(question, history, inventory))
         except ValidationError as exc:
@@ -189,16 +247,22 @@ class Agent:
         if any(pid not in by_id for pid in selection.policy_ids):
             raise SourceError("The model referenced an unavailable policy. No action was taken.")
         gap = force_gap or selection.operation in {"gap", "placeholder"}
-        selected = list(
-            dict.fromkeys(
-                lexical_policy_ids(
-                    resolved_question,
-                    inventory,
-                    previous_question=previous_context_question(history),
-                )
-                + selection.policy_ids
-            )
+        lexical = lexical_policy_ids(
+            resolved_question,
+            inventory,
+            previous_question=previous_context_question(history),
         )
+        lexical_titles = [brief(by_id[item].title) for item in lexical if item in by_id][:8]
+        self._event(
+            "Searching index: title and tags",
+            f"Title and tag matches: {len(lexical)}. {', '.join(lexical_titles) or 'none'}.",
+        )
+        self._event(
+            "Selecting policies",
+            f"Selection: operation {selection.operation}, "
+            f"{len(selection.policy_ids)} policies chosen by the model.",
+        )
+        selected = list(dict.fromkeys(lexical + selection.policy_ids))
         selection.policy_ids = selected
         ids = selected
         hits = self._index_hits(resolved_question, selected, selection.operation, gap)
@@ -214,7 +278,12 @@ class Agent:
         )
         if docs:
             # Chunks stand in for whole documents, so more than 15 policies can be used.
-            self.on_event("Search Policy Index")
+            for document in docs:
+                if getattr(document, "indexed", False):
+                    self._event(
+                        "Indexed sections",
+                        f"Indexed sections: {brief(document.title)}, not fetched from Notion.",
+                    )
             covered = {document.id for document in docs}
             for pid in [policy_id for policy_id in selected if policy_id not in covered][:3]:
                 docs.append(self._read_one(by_id[pid]))
@@ -226,6 +295,27 @@ class Agent:
             docs = [self._read_one(by_id[pid]) for pid in ids]
         exhaustive = set(ids) == set(by_id) and all(d.complete for d in docs)
         response_docs = docs
+        not_live = [
+            brief(by_id[document.id].title)
+            for document in docs
+            if not by_id[document.id].is_live(today)
+        ]
+        self._event(
+            "Checking Live status",
+            f"Live check: {len(not_live)} of {len(docs)} policies are not Live"
+            + (f" and procedure text is withheld: {', '.join(not_live[:8])}" if not_live else "")
+            + ".",
+        )
+        status_bits = [
+            f"{brief(by_id[document.id].title)} {policy_status(by_id[document.id], today)}"
+            for document in docs
+        ]
+        self._event(
+            "Review status",
+            "Review status: "
+            + ("; ".join(status_bits[:12]) if status_bits else "no policy was used")
+            + ".",
+        )
         if selection.operation == "answer" and not gap:
             response_docs = [
                 d
@@ -281,13 +371,48 @@ class Agent:
                 "\n\nIndexed sections were used from the policy text search. "
                 "This is not a full read of every matching page."
             )
+        excerpted = getattr(self.model, "excerpted_titles", None) or []
+        if excerpted:
+            self._event(
+                "Size budget",
+                "Truncated to matching sections: "
+                + ", ".join(brief(title) for title in excerpted[:8])
+                + ".",
+            )
+        if limited:
+            self._event("Size budget", "Notion reads were limited to 15 policies.")
         return today, profile, inventory, docs, selection, assessment
 
     def ask(self, question, history):
-        if is_overdue_question(question):
-            return self._answer_overdue(question)
-        if is_register_question(question):
-            return self._answer_from_register(question)
+        progress = Progress(self.on_event)
+        with use_progress(progress):
+            if is_overdue_question(question):
+                self._event(
+                    "Routing",
+                    "Routing: overdue list. This is a short request for out-of-date policies, "
+                    "so policy text is not opened.",
+                )
+                result = self._answer_overdue(question)
+                cited = "Sources: overdue list. Policy text was not opened."
+            elif is_register_question(question):
+                self._event(
+                    "Routing",
+                    "Routing: policy register. This asks about the inventory, not what to do.",
+                )
+                result = self._answer_from_register(question)
+                cited = "Sources: policy register. Policy text was not opened."
+            else:
+                self._event(
+                    "Routing",
+                    "Routing: normal retrieval. This is not a short overdue-list or register request.",
+                )
+                result = self._answer_from_policies(question, history)
+                cited = _cited(result)
+            self._event("Finished", f"Finished in {progress.elapsed:.2f}s. {cited}")
+            self._event("Summary", "Summary: " + " → ".join(progress.labels))
+            return result
+
+    def _answer_from_policies(self, question, history):
         today, profile, inventory, docs, selection, assessment = self._evaluate(question, history)
         by_id = {p.id: p for p in inventory}
         by_document_id = {d.id: d for d in docs}
@@ -343,10 +468,15 @@ class Agent:
     def _answer_overdue(self, question):
         """Out-of-date list from inventory metadata. No profile body, policy text, or model."""
         try:
-            self.on_event("Current Date · Europe/London")
             today = self.clock()
-            self.on_event("List Overdue Policies · titles, owners, review dates and tags only")
+            self._event("Current date", f"Current date: Europe/London, {today.isoformat()}.")
+            started = time.perf_counter()
             inventory = self.sources.inventory()
+            self._event(
+                "Policy inventory",
+                f"Policy inventory: {len(inventory)} pages, {time.perf_counter() - started:.2f}s. "
+                "List Overdue Policies: titles, owners, review dates and tags only.",
+            )
             text = list_overdue_policies(inventory, today, question, source_link)
         except SourceError:
             raise
@@ -370,13 +500,21 @@ class Agent:
     def _answer_from_register(self, question):
         """Review status for the whole inventory. Dates come from the records, not the model."""
         try:
-            self.on_event("Current Date · Europe/London")
             today = self.clock()
-            self.on_event("Get Surgery Profile")
+            self._event("Current date", f"Current date: Europe/London, {today.isoformat()}.")
+            started = time.perf_counter()
             self.sources.profile()
-            self.on_event("List Policies")
+            self._event(
+                "Reading Notion",
+                f"Surgery profile: live Notion read, {time.perf_counter() - started:.2f}s.",
+            )
+            started = time.perf_counter()
             inventory = self.sources.inventory()
-            self.on_event("Policy register · titles, tags, owners and review dates")
+            self._event(
+                "Policy inventory",
+                f"Policy inventory: {len(inventory)} pages, {time.perf_counter() - started:.2f}s. "
+                "Policy register: titles, tags, owners and review dates.",
+            )
             text = render_register(question, inventory, today, source_link)
         except SourceError:
             raise
@@ -404,19 +542,28 @@ class Agent:
             total = sum(counts) if counts and None not in counts else None
             self.log_answer(question, text, datetime.now(ZoneInfo("Europe/London")), models, total)
         except Exception:  # noqa: BLE001 -- a log failure must not discard a verified answer
-            self.on_event("Log Answer · Notion did not confirm the save")
+            self._event("Log answer", "Log Answer · Notion did not confirm the save")
         else:
-            self.on_event("Log Answer · saved to Notion")
+            self._event("Log answer", "Log Answer · saved to Notion")
 
     def create(self, title, advice, inventory):
         """Create the user-authorised proposal using its previously reviewed inventory."""
-        with WRITE_LOCK:
+        progress = Progress(self.on_event)
+        with use_progress(progress), WRITE_LOCK:
             if inventory is None:
                 raise SourceError("The saved proposal is unavailable. Ask for a new proposal.")
-            self.on_event("Current Date · Europe/London")
             today = self.clock()
-            self.on_event("Create Placeholder · verify fields, Agent Advice and empty body")
+            self._event(
+                "Creating placeholder",
+                f"Current date: Europe/London, {today.isoformat()}. "
+                "Create Placeholder: verify fields, Agent Advice and empty body.",
+            )
+            started = time.perf_counter()
             created = create_placeholder(self.sources.client, title, today, inventory, advice)
+            self._event(
+                "Creating placeholder",
+                f"Placeholder written in {time.perf_counter() - started:.2f}s: {brief(title)}.",
+            )
             return Result(
                 f"Created {source_link(title, created.get('public_url'))}: tagged "
                 f"**NEW POLICY REQUIRED**; **Review Date:** {today.isoformat()}; "
