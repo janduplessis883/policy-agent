@@ -81,5 +81,6 @@ def test_full_text_vector_and_row_level_security(database):
         cursor.execute("reset role")
         cursor.execute("select count(*) from policy_chunks")
         assert cursor.fetchone()[0] == 2
+        cursor.execute("drop owned by nathan_reader")
         cursor.execute("drop role nathan_reader")
     database.commit()
