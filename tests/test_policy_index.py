@@ -6,7 +6,7 @@ import httpx
 from nathan.agent import Agent
 from nathan.config import Settings
 from nathan.domain import Document, Policy, SourceError
-from nathan.policy_index import ChunkHit, build_index
+from nathan.policy_index import ChunkHit, PolicyIndex, build_index
 from nathan.supabase_store import IndexUnavailable, SupabaseStore
 
 
@@ -151,6 +151,134 @@ def test_missing_supabase_settings_stay_in_keyword_mode(caplog):
     assert index.enabled is False
     assert "keyword mode" in caplog.text
     assert "super-secret-value" not in caplog.text
+
+
+def _index_with(policies, embed):
+    saved = []
+
+    class Store:
+        def try_lock(self, holder, seconds=300):
+            return True
+
+        def unlock(self, holder):
+            self.unlocked = True
+
+        def fetch_state(self):
+            return []
+
+        def delete_pages(self, ids):
+            self.deleted = list(ids)
+
+        def replace_page(self, page_id, chunks):
+            saved.append((page_id, chunks))
+
+        def touch_page(self, *args):
+            pass
+
+    index = PolicyIndex.__new__(PolicyIndex)
+    index._store = Store()
+    index._notion = object()
+    index._embedder = embed
+    index._holder = "test"
+    index.degraded = False
+    index.saved = saved
+    return index
+
+
+class _Vectors:
+    model = "text-embedding-3-small"
+    dimensions = 1536
+
+    def embed(self, texts):
+        return [[0.1] * 1536 for _ in texts]
+
+
+class _NoVectors:
+    model = "text-embedding-3-small"
+    dimensions = 1536
+
+    def embed(self, texts):
+        return None
+
+
+def _patch_sources(monkeypatch, policies, fail_ids=()):
+    from nathan.domain import Document
+
+    monkeypatch.setattr("nathan.tools.list_policies.list_policies", lambda client: policies)
+
+    def read(client, policy):
+        if policy.id in fail_ids:
+            raise SourceError("Notion could not read this page")
+        return Document(
+            policy.id, policy.title, "# Fridge temperatures\nRecord the minimum every day."
+        )
+
+    monkeypatch.setattr("nathan.tools.read_policy.read_policy", read)
+
+
+def test_max_pages_none_indexes_every_page(monkeypatch):
+    policies = [
+        Policy(f"p{i}", f"Policy {i}", review_date="2027-01-01", last_edited_time="t")
+        for i in range(3)
+    ]
+    _patch_sources(monkeypatch, policies)
+    index = _index_with(policies, _Vectors())
+    text = index.sync_incremental(max_pages=None)
+    assert "Notion inventory: 3 pages" in text
+    assert "Embedded 3" in text
+    assert [page_id for page_id, _ in index.saved] == ["p0", "p1", "p2"]
+
+
+def test_embedding_failure_is_counted_and_text_is_still_stored(monkeypatch):
+    policies = [
+        Policy("p0", "Cold chain", review_date="2027-01-01"),
+        Policy("p1", "Safeguarding", review_date="2027-01-01"),
+    ]
+    _patch_sources(monkeypatch, policies)
+    index = _index_with(policies, _NoVectors())
+    text = index.sync_incremental(max_pages=None)
+    assert "Notion inventory: 2 pages" in text
+    assert "stored without embeddings 2" in text
+    assert "Embedding failed" in text
+    assert all(chunk["embedding"] == "" for _, chunks in index.saved for chunk in chunks)
+    assert all(chunk["embedding_model"] is None for _, chunks in index.saved for chunk in chunks)
+    assert "p0: embedding failed (no vectors returned)" in text
+
+
+def test_read_errors_do_not_hide_the_inventory_count(monkeypatch):
+    policies = [Policy("bad", "Broken", review_date="2027-01-01")]
+    _patch_sources(monkeypatch, policies, fail_ids={"bad"})
+    text = _index_with(policies, _Vectors()).sync_incremental(max_pages=None)
+    assert "Notion inventory: 1 page " in text
+    assert "read failed 1" in text
+    assert "bad: read failed (SourceError)" in text
+
+
+def test_max_pages_stops_and_reports_the_remainder(monkeypatch):
+    policies = [Policy(f"p{i}", f"Policy {i}", review_date="2027-01-01") for i in range(3)]
+    _patch_sources(monkeypatch, policies)
+    text = _index_with(policies, _Vectors()).sync_incremental(max_pages=1)
+    assert "Embedded 1" in text
+    assert "2 changed pages are still waiting" in text
+
+
+def test_excluded_pages_explain_a_zero_refresh(monkeypatch):
+    policies = [Policy("draft", "Draft policy", excluded=True)]
+    _patch_sources(monkeypatch, policies)
+    text = _index_with(policies, _Vectors()).sync_incremental(max_pages=None)
+    assert "Notion inventory: 1 page " in text
+    assert "1 excluded as archived or draft status" in text
+    assert "Embedded 0" in text
+
+
+def test_lock_already_held_does_not_look_like_an_empty_inventory():
+    index = _index_with([], _Vectors())
+
+    def busy(holder, seconds=300):
+        return False
+
+    index._store.try_lock = busy
+    assert index.sync_incremental(max_pages=None) == "Another index update is already running."
 
 
 def test_supabase_http_error_logs_the_postgrest_body_not_the_key(caplog):
